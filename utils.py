@@ -298,13 +298,13 @@ def validate_conversion_output(out_dir: Path, expected_frames: int,
             if not stats_file.exists():
                 errors.append("Missing meta/stats.json")
             
-            # Check data files
-            parquet_files = list(data_dir.glob("*.parquet"))
+            # Check data files (in chunk subdirectories)
+            parquet_files = list(data_dir.glob("chunk-*/*.parquet"))
             if not parquet_files:
                 errors.append("No data parquet files found")
-            
-            # Check video files
-            video_files = list(videos_dir.glob("main_*.mp4"))
+
+            # Check video files (in chunk subdirectories)
+            video_files = list(videos_dir.glob("chunk-*/*/*.mp4"))
             if not video_files:
                 errors.append("No video files found")
         

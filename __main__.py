@@ -65,9 +65,15 @@ Examples:
                        help="Create visualization video with hand landmarks and gaze projections")
     parser.add_argument("--rotate-visualization", action="store_true",
                        help="Rotate visualization video 90 degrees clockwise")
-    
+
+    # Haptic data integration
+    parser.add_argument("--haptic-csv", type=str,
+                       help="Path to haptic force sensor CSV file")
+    parser.add_argument("--haptic-offset", type=float, default=0.0,
+                       help="Time offset in seconds for haptic data alignment (default: 0.0)")
+
     # Logging
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], 
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                        default="INFO", help="Logging level")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     
@@ -191,6 +197,8 @@ def main():
             log_level=args.log_level,
             create_visualization=args.create_visualization,
             rotate_visualization=args.rotate_visualization,
+            haptic_csv=args.haptic_csv,
+            haptic_time_offset=args.haptic_offset,
         )
         
         if not args.quiet:

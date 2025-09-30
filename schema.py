@@ -68,24 +68,92 @@ class LeRobotSchema:
         
         return pa.schema(schema_fields)
     
-    def get_info_json(self, fps: float, episode_count: int, **kwargs) -> Dict[str, Any]:
-        """Generate meta/info.json content"""
-        info = {
-            "schema_version": self.version,
-            "fps": fps,
-            "episode_count": episode_count,
-            "columns": {
-                col_name: {
-                    "shape": list(col_spec.shape),
+    def get_info_json(self, fps: float, episode_count: int, total_frames: int = 0,
+                      video_shape: Tuple[int, int, int] = (224, 224, 3), **kwargs) -> Dict[str, Any]:
+        """Generate meta/info.json content compatible with LeRobotDataset
+
+        Args:
+            fps: Frames per second
+            episode_count: Number of episodes
+            total_frames: Total frame count across all episodes
+            video_shape: Video frame shape (height, width, channels)
+            **kwargs: Additional metadata fields
+        """
+
+        # Generate v2.1-compatible features schema (without _type for visualize_dataset compatibility)
+        features = {}
+        for col_name, col_spec in self.columns.items():
+            if len(col_spec.shape) == 0:
+                # Scalar values - use shape: [1] for v2.1 compatibility
+                features[col_name] = {
                     "dtype": col_spec.dtype,
-                    "description": col_spec.description
+                    "shape": [1],
+                    "names": None
                 }
-                for col_name, col_spec in self.columns.items()
-            },
-            "video_columns": self.video_columns,
-            "required_columns": self.required_columns
+            else:
+                # Array values
+                shape_list = list(col_spec.shape)
+                features[col_name] = {
+                    "dtype": col_spec.dtype,
+                    "shape": shape_list,
+                    "names": None
+                }
+
+        # Add video features with full v2.1 video metadata
+        h, w, c = video_shape
+        for video_col in self.video_columns:
+            features[video_col] = {
+                "dtype": "video",
+                "shape": [h, w, c],  # H, W, C order for v2.1
+                "names": ["height", "width", "channels"],
+                "info": {
+                    "video.height": h,
+                    "video.width": w,
+                    "video.codec": "libx264",
+                    "video.pix_fmt": "yuv420p",
+                    "video.is_depth_map": False,
+                    "video.fps": fps,
+                    "video.channels": c,
+                    "has_audio": False
+                }
+            }
+
+        info = {
+            # Core metadata - v2.1 format
+            "codebase_version": "v2.1",  # Match debug dataset format
+            "total_episodes": episode_count,
+            "total_frames": total_frames,
+            "total_tasks": 1,  # Single task (aria_recording)
+            "total_videos": len(self.video_columns),
+            "total_chunks": 1,  # Single chunk for now
+            "chunks_size": 1000,
+            "fps": fps,
+
+            # Data paths
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+
+            # v2.1 features schema (compatible with visualize_dataset)
+            "features": features
         }
-        info.update(kwargs)
+
+        # Add optional robot_type if provided
+        if "robot_type" in kwargs:
+            info["robot_type"] = kwargs["robot_type"]
+        else:
+            info["robot_type"] = "aria"  # Default for Aria recordings
+
+        # Add train split if provided
+        if "splits" in kwargs:
+            info["splits"] = kwargs["splits"]
+        else:
+            info["splits"] = {"train": f"0:{episode_count}"}
+
+        # Update with additional kwargs
+        for key, value in kwargs.items():
+            if key not in info and key != "video_shape":
+                info[key] = value
+
         return info
 
 
@@ -94,35 +162,45 @@ LEROBOT_V3_SCHEMA = LeRobotSchema(
     version="3.0",
     columns={
         # Core temporal columns
+        "index": ColumnSpec((), "int64", "Global index across all episodes"),
+        "episode_index": ColumnSpec((), "int64", "Episode index (same as episode_id)"),
+        "frame_index": ColumnSpec((), "int64", "Frame index within episode (same as step)"),
+        "task_index": ColumnSpec((), "int64", "Task index"),
         "timestamp": ColumnSpec((), "float64", "Timestamp in seconds"),
         "timestamp_ns": ColumnSpec((), "int64", "Timestamp in nanoseconds (device time)"),
         "episode_id": ColumnSpec((), "int32", "Episode identifier"),
         "step": ColumnSpec((), "int64", "Step within episode (0-indexed)"),
-        
-        # Hand landmarks in world coordinates (21 points × 3 coords × 2 hands = 126, but flattened to 63 per hand)
+
+        # Standard LeRobot observation.state: hand landmarks + pose (63 + 16 = 79 dims)
+        "observation.state": ColumnSpec((79,), "float32", "Hand landmarks (63) + device pose (16)"),
+
+        # Standard LeRobot action: tactile forces (left_total + right_total + left_xyz + right_xyz = 1+1+3+3 = 8 dims)
+        "action": ColumnSpec((8,), "float32", "Tactile forces: [left_total, right_total, left_xyz(3), right_xyz(3)]"),
+
+        # Keep original detailed columns for reference
         "status.hands.landmarks_world": ColumnSpec((63,), "float32", "Hand landmarks in world coords (21×3 flattened)"),
         "status.hands.valid_left": ColumnSpec((), "bool", "Left hand validity flag"),
         "status.hands.valid_right": ColumnSpec((), "bool", "Right hand validity flag"),
-        
-        # Tactile actions (reserved/placeholder with NaN values)
+
         "action.tactile.left.force_total": ColumnSpec((), "float32", "Left hand total force"),
         "action.tactile.right.force_total": ColumnSpec((), "float32", "Right hand total force"),
         "action.tactile.left.force_xyz": ColumnSpec((3,), "float32", "Left hand force vector"),
         "action.tactile.right.force_xyz": ColumnSpec((3,), "float32", "Right hand force vector"),
-        
+
         # Tactile action masks
         "action.mask.tactile.left.force_total": ColumnSpec((), "bool", "Left force total mask"),
         "action.mask.tactile.right.force_total": ColumnSpec((), "bool", "Right force total mask"),
         "action.mask.tactile.left.force_xyz": ColumnSpec((3,), "bool", "Left force vector mask"),
         "action.mask.tactile.right.force_xyz": ColumnSpec((3,), "bool", "Right force vector mask"),
-        
-        # Device pose in world coordinates (SE3 as 4×4 matrix flattened)
+
+        # Device pose
         "status.pose.world_device": ColumnSpec((16,), "float32", "World to device transform (4×4 flattened)"),
         "status.pose.valid": ColumnSpec((), "bool", "Pose validity flag"),
     },
     required_columns=[
+        "index", "episode_index", "frame_index", "task_index",
         "timestamp", "timestamp_ns", "episode_id", "step",
-        "status.hands.landmarks_world", "status.hands.valid_left", "status.hands.valid_right"
+        "observation.state", "action"  # Standard LeRobot columns
     ],
     video_columns=["observation.images.main"]
 )
@@ -132,35 +210,45 @@ LEROBOT_V21_SCHEMA = LeRobotSchema(
     version="2.1",
     columns={
         # Core temporal columns (same as v3)
+        "index": ColumnSpec((), "int64", "Global index across all episodes"),
+        "episode_index": ColumnSpec((), "int64", "Episode index (same as episode_id)"),
+        "frame_index": ColumnSpec((), "int64", "Frame index within episode (same as step)"),
+        "task_index": ColumnSpec((), "int64", "Task index"),
         "timestamp": ColumnSpec((), "float64", "Timestamp in seconds"),
         "timestamp_ns": ColumnSpec((), "int64", "Timestamp in nanoseconds (device time)"),
         "episode_id": ColumnSpec((), "int32", "Episode identifier"),
         "step": ColumnSpec((), "int64", "Step within episode (0-indexed)"),
-        
-        # Hand landmarks (same schema as v3)
+
+        # Standard LeRobot observation.state: hand landmarks + pose (63 + 16 = 79 dims)
+        "observation.state": ColumnSpec((79,), "float32", "Hand landmarks (63) + device pose (16)"),
+
+        # Standard LeRobot action: tactile forces (left_total + right_total + left_xyz + right_xyz = 1+1+3+3 = 8 dims)
+        "action": ColumnSpec((8,), "float32", "Tactile forces: [left_total, right_total, left_xyz(3), right_xyz(3)]"),
+
+        # Keep original detailed columns for reference
         "status.hands.landmarks_world": ColumnSpec((63,), "float32", "Hand landmarks in world coords (21×3 flattened)"),
         "status.hands.valid_left": ColumnSpec((), "bool", "Left hand validity flag"),
         "status.hands.valid_right": ColumnSpec((), "bool", "Right hand validity flag"),
-        
-        # Tactile actions (same as v3)
+
         "action.tactile.left.force_total": ColumnSpec((), "float32", "Left hand total force"),
         "action.tactile.right.force_total": ColumnSpec((), "float32", "Right hand total force"),
         "action.tactile.left.force_xyz": ColumnSpec((3,), "float32", "Left hand force vector"),
         "action.tactile.right.force_xyz": ColumnSpec((3,), "float32", "Right hand force vector"),
-        
-        # Tactile action masks (same as v3)
+
+        # Tactile action masks
         "action.mask.tactile.left.force_total": ColumnSpec((), "bool", "Left force total mask"),
         "action.mask.tactile.right.force_total": ColumnSpec((), "bool", "Right force total mask"),
         "action.mask.tactile.left.force_xyz": ColumnSpec((3,), "bool", "Left force vector mask"),
         "action.mask.tactile.right.force_xyz": ColumnSpec((3,), "bool", "Right force vector mask"),
-        
-        # Device pose (same as v3)
+
+        # Device pose
         "status.pose.world_device": ColumnSpec((16,), "float32", "World to device transform (4×4 flattened)"),
         "status.pose.valid": ColumnSpec((), "bool", "Pose validity flag"),
     },
     required_columns=[
+        "index", "episode_index", "frame_index", "task_index",
         "timestamp", "timestamp_ns", "episode_id", "step",
-        "status.hands.landmarks_world", "status.hands.valid_left", "status.hands.valid_right"
+        "observation.state", "action"  # Standard LeRobot columns
     ],
     video_columns=["observation.images.main"]
 )
@@ -213,18 +301,45 @@ def unflatten_hand_landmarks(flattened: np.ndarray) -> np.ndarray:
     return flattened.reshape(21, 3)
 
 
-def create_tactile_placeholders() -> Dict[str, Any]:
-    """Create placeholder tactile action data (all NaN with masks=False)"""
-    return {
-        "action.tactile.left.force_total": np.float32(np.nan),
-        "action.tactile.right.force_total": np.float32(np.nan),
-        "action.tactile.left.force_xyz": np.full(3, np.nan, dtype=np.float32),
-        "action.tactile.right.force_xyz": np.full(3, np.nan, dtype=np.float32),
-        "action.mask.tactile.left.force_total": False,
-        "action.mask.tactile.right.force_total": False,
-        "action.mask.tactile.left.force_xyz": np.array([False, False, False]),
-        "action.mask.tactile.right.force_xyz": np.array([False, False, False]),
-    }
+def create_tactile_placeholders(force_left: Optional[Tuple[float, np.ndarray]] = None,
+                               force_right: Optional[Tuple[float, np.ndarray]] = None) -> Dict[str, Any]:
+    """
+    Create tactile action data (real values or NaN placeholders)
+
+    Args:
+        force_left: Tuple of (magnitude, xyz_array) for left sensor (optional)
+        force_right: Tuple of (magnitude, xyz_array) for right sensor (optional)
+
+    Returns:
+        Dictionary with tactile data columns and masks
+    """
+    if force_left is not None and force_right is not None:
+        # Real haptic data available - unpack tuples
+        left_mag, left_xyz = force_left
+        right_mag, right_xyz = force_right
+
+        return {
+            "action.tactile.left.force_total": np.float32(left_mag),
+            "action.tactile.right.force_total": np.float32(right_mag),
+            "action.tactile.left.force_xyz": left_xyz.astype(np.float32),
+            "action.tactile.right.force_xyz": right_xyz.astype(np.float32),
+            "action.mask.tactile.left.force_total": True,
+            "action.mask.tactile.right.force_total": True,
+            "action.mask.tactile.left.force_xyz": np.array([True, True, True]),
+            "action.mask.tactile.right.force_xyz": np.array([True, True, True]),
+        }
+    else:
+        # Fallback to NaN placeholders
+        return {
+            "action.tactile.left.force_total": np.float32(np.nan),
+            "action.tactile.right.force_total": np.float32(np.nan),
+            "action.tactile.left.force_xyz": np.full(3, np.nan, dtype=np.float32),
+            "action.tactile.right.force_xyz": np.full(3, np.nan, dtype=np.float32),
+            "action.mask.tactile.left.force_total": False,
+            "action.mask.tactile.right.force_total": False,
+            "action.mask.tactile.left.force_xyz": np.array([False, False, False]),
+            "action.mask.tactile.right.force_xyz": np.array([False, False, False]),
+        }
 
 
 def flatten_pose_matrix(pose_matrix: np.ndarray) -> np.ndarray:

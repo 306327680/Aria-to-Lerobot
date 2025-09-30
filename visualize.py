@@ -170,6 +170,109 @@ def draw_gaze_point(image: np.ndarray,
     
     return image
 
+def draw_force_bars(image: np.ndarray,
+                    force_left: float,
+                    force_right: float,
+                    max_force: float = 150.0) -> np.ndarray:
+    """
+    绘制力度指示条
+
+    Args:
+        image: 输入图像
+        force_left: 左手力度值
+        force_right: 右手力度值
+        max_force: 最大力度值（用于归一化）
+
+    Returns:
+        带有力度指示条的图像
+    """
+    image = image.copy()
+    h, w = image.shape[:2]
+
+    # 力度条参数
+    bar_width = 30
+    bar_max_height = 150
+    bar_x_left = w - 120  # 左手力度条X坐标
+    bar_x_right = w - 60  # 右手力度条X坐标
+    bar_y_bottom = h - 30  # 底部Y坐标
+
+    # 绘制半透明背景
+    overlay = image.copy()
+    bg_x1 = w - 140
+    bg_y1 = bar_y_bottom - bar_max_height - 40
+    bg_x2 = w - 10
+    bg_y2 = h - 10
+    cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, image, 0.4, 0, image)
+
+    # 标题
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(image, "FORCE", (bg_x1 + 25, bg_y1 + 20),
+               font, 0.5, (255, 255, 255), 1)
+
+    # 绘制左手力度条
+    force_left_normalized = min(force_left / max_force, 1.0)
+    bar_height_left = int(bar_max_height * force_left_normalized)
+
+    # 左手边框
+    cv2.rectangle(image,
+                 (bar_x_left, bar_y_bottom - bar_max_height),
+                 (bar_x_left + bar_width, bar_y_bottom),
+                 (100, 100, 100), 2)
+
+    # 左手填充（渐变色：绿->黄->红）
+    if bar_height_left > 0:
+        # 根据力度值选择颜色
+        if force_left_normalized < 0.33:
+            color = (0, 255, 0)  # 绿色
+        elif force_left_normalized < 0.66:
+            color = (0, 255, 255)  # 黄色
+        else:
+            color = (0, 0, 255)  # 红色
+
+        cv2.rectangle(image,
+                     (bar_x_left, bar_y_bottom - bar_height_left),
+                     (bar_x_left + bar_width, bar_y_bottom),
+                     color, -1)
+
+    # 左手标签和数值
+    cv2.putText(image, "L", (bar_x_left + 8, bar_y_bottom + 18),
+               font, 0.4, (255, 255, 255), 1)
+    cv2.putText(image, f"{force_left:.0f}N", (bar_x_left - 5, bar_y_bottom - bar_max_height - 5),
+               font, 0.35, (0, 255, 0), 1)
+
+    # 绘制右手力度条
+    force_right_normalized = min(force_right / max_force, 1.0)
+    bar_height_right = int(bar_max_height * force_right_normalized)
+
+    # 右手边框
+    cv2.rectangle(image,
+                 (bar_x_right, bar_y_bottom - bar_max_height),
+                 (bar_x_right + bar_width, bar_y_bottom),
+                 (100, 100, 100), 2)
+
+    # 右手填充
+    if bar_height_right > 0:
+        if force_right_normalized < 0.33:
+            color = (0, 255, 0)
+        elif force_right_normalized < 0.66:
+            color = (0, 255, 255)
+        else:
+            color = (0, 0, 255)
+
+        cv2.rectangle(image,
+                     (bar_x_right, bar_y_bottom - bar_height_right),
+                     (bar_x_right + bar_width, bar_y_bottom),
+                     color, -1)
+
+    # 右手标签和数值
+    cv2.putText(image, "R", (bar_x_right + 8, bar_y_bottom + 18),
+               font, 0.4, (255, 255, 255), 1)
+    cv2.putText(image, f"{force_right:.0f}N", (bar_x_right - 5, bar_y_bottom - bar_max_height - 5),
+               font, 0.35, (0, 255, 0), 1)
+
+    return image
+
 def add_info_overlay(image: np.ndarray,
                     frame_idx: int,
                     timestamp_s: float,
@@ -178,18 +281,18 @@ def add_info_overlay(image: np.ndarray,
     """添加信息叠加层"""
     image = image.copy()
     h, w = image.shape[:2]
-    
+
     # 半透明背景
     overlay = image.copy()
     cv2.rectangle(overlay, (10, 10), (400, 120), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.7, image, 0.3, 0, image)
-    
+
     # 文本信息
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.5
     color = (255, 255, 255)
     thickness = 1
-    
+
     y_offset = 30
     cv2.putText(image, f"Frame: {frame_idx}", (20, y_offset), font, font_scale, color, thickness)
     y_offset += 20
@@ -198,7 +301,7 @@ def add_info_overlay(image: np.ndarray,
     cv2.putText(image, hands_info, (20, y_offset), font, font_scale, (0, 255, 0), thickness)
     y_offset += 20
     cv2.putText(image, gaze_info, (20, y_offset), font, font_scale, (0, 0, 255), thickness)
-    
+
     return image
 
 def create_visualization_video(vrs_path: str,
@@ -206,10 +309,12 @@ def create_visualization_video(vrs_path: str,
                               output_path: str,
                               max_frames: Optional[int] = None,
                               stride: int = 1,
-                              rotate_image: bool = False) -> None:
+                              rotate_image: bool = False,
+                              haptic_loader = None,
+                              start_timestamp_ns: int = 0) -> None:
     """
     创建可视化视频
-    
+
     Args:
         vrs_path: VRS文件路径
         mps_dir: MPS数据目录
@@ -217,6 +322,8 @@ def create_visualization_video(vrs_path: str,
         max_frames: 最大帧数限制
         stride: 帧间隔
         rotate_image: 是否顺时针旋转90度
+        haptic_loader: 触觉数据加载器（可选）
+        start_timestamp_ns: 起始时间戳（纳秒）
     """
     logger.info(f"创建可视化视频...")
     logger.info(f"VRS文件: {vrs_path}")
@@ -324,23 +431,31 @@ def create_visualization_video(vrs_path: str,
                     gaze_point, depth, is_valid = gaze_result
                     if is_valid:
                         image_bgr = draw_gaze_point(
-                            image_bgr, gaze_point, 
+                            image_bgr, gaze_point,
                             color=(0, 0, 255), radius=8
                         )
                         gaze_info = f"Gaze: ({gaze_point[0]:.0f}, {gaze_point[1]:.0f})"
                         valid_gaze += 1
             except Exception as e:
                 logger.debug(f"眼动投影失败: {e}")
-            
-            # 添加信息叠加
-            image_bgr = add_info_overlay(
-                image_bgr, frame_idx, timestamp_s, hands_info, gaze_info
-            )
-            
-            # 旋转图像（如果需要）- 在所有投影和绘制完成后
+
+            # 旋转图像（如果需要）- 在投影后、UI叠加前
+            # 这样手部和眼动会随图像旋转，但UI元素保持正常方向
             if rotate_image:
                 # 顺时针旋转90度
                 image_bgr = cv2.rotate(image_bgr, cv2.ROTATE_90_CLOCKWISE)
+
+            # 添加信息叠加（在旋转后的图像上）
+            image_bgr = add_info_overlay(
+                image_bgr, frame_idx, timestamp_s, hands_info, gaze_info
+            )
+
+            # 绘制力度指示条（在旋转后的图像上）
+            if haptic_loader is not None:
+                # 计算相对时间（从起始时间戳开始）
+                time_s = (timestamp_ns - start_timestamp_ns) / 1e9
+                force_left, force_right = haptic_loader.get_force_at_time(time_s)
+                image_bgr = draw_force_bars(image_bgr, force_left, force_right)
             
             # 写入视频帧
             writer.write(image_bgr)

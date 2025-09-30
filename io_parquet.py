@@ -105,8 +105,12 @@ class ParquetWriter:
         """Flush current batch to a parquet shard"""
         if not self.current_batch:
             return
-        
-        shard_filename = f"{self.base_filename}_{self.current_shard:03d}.parquet"
+
+        # For single shard (episode), use base_filename without suffix for LeRobot compatibility
+        if self.current_shard == 0:
+            shard_filename = f"{self.base_filename}.parquet"
+        else:
+            shard_filename = f"{self.base_filename}_{self.current_shard:03d}.parquet"
         shard_path = self.output_dir / shard_filename
         
         logger.info(f"Writing shard {self.current_shard}: {len(self.current_batch)} rows -> {shard_filename}")

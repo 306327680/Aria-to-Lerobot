@@ -35,12 +35,138 @@ from .utils import (
 )
 from .visualize import create_visualization_video
 
+# Haptic data support
+import pandas as pd
+
 
 logger = logging.getLogger(__name__)
 
 
+class HapticDataLoader:
+    """触觉数据加载器 - Loads and interpolates haptic force sensor data"""
+
+    def __init__(self, csv_path: str, time_offset: float = 0.0):
+        """
+        Initialize haptic data loader
+
+        Args:
+            csv_path: Path to haptic CSV file
+            time_offset: Time offset in seconds (haptic data needs to be delayed by this amount)
+        """
+        self.csv_path = csv_path
+        self.time_offset = time_offset
+
+        # Load CSV data
+        df = pd.read_csv(csv_path)
+
+        # Extract timestamps (use relative_time column)
+        if 'relative_time' in df.columns:
+            self.timestamps = df['relative_time'].values
+        elif 'timestamp' in df.columns:
+            timestamps = df['timestamp'].values
+            # Convert to relative time if absolute timestamp
+            if timestamps[0] > 1e9:
+                timestamps = timestamps / 1e9
+            self.timestamps = timestamps - timestamps[0]
+        else:
+            raise ValueError("CSV file must have 'relative_time' or 'timestamp' column")
+
+        # Extract force data (magnitude + xyz components)
+        magnitude_cols = [col for col in df.columns if 'magnitude' in col.lower()]
+
+        if len(magnitude_cols) >= 2:
+            # Assume first two magnitude columns are the two sensors
+            self.sensor1_name = magnitude_cols[0].replace('_magnitude', '')
+            self.sensor2_name = magnitude_cols[1].replace('_magnitude', '')
+
+            # Extract magnitude
+            self.force1_magnitude = df[magnitude_cols[0]].values
+            self.force2_magnitude = df[magnitude_cols[1]].values
+
+            # Extract xyz components if available
+            fx1_col = f"{self.sensor1_name}_fx"
+            fy1_col = f"{self.sensor1_name}_fy"
+            fz1_col = f"{self.sensor1_name}_fz"
+            fx2_col = f"{self.sensor2_name}_fx"
+            fy2_col = f"{self.sensor2_name}_fy"
+            fz2_col = f"{self.sensor2_name}_fz"
+
+            if all(col in df.columns for col in [fx1_col, fy1_col, fz1_col]):
+                self.force1_xyz = np.stack([df[fx1_col].values, df[fy1_col].values, df[fz1_col].values], axis=1)
+            else:
+                # Fallback: put magnitude in x, zero in y/z
+                self.force1_xyz = np.column_stack([self.force1_magnitude, np.zeros_like(self.force1_magnitude), np.zeros_like(self.force1_magnitude)])
+
+            if all(col in df.columns for col in [fx2_col, fy2_col, fz2_col]):
+                self.force2_xyz = np.stack([df[fx2_col].values, df[fy2_col].values, df[fz2_col].values], axis=1)
+            else:
+                # Fallback: put magnitude in x, zero in y/z
+                self.force2_xyz = np.column_stack([self.force2_magnitude, np.zeros_like(self.force2_magnitude), np.zeros_like(self.force2_magnitude)])
+
+        elif len(magnitude_cols) == 1:
+            self.sensor1_name = magnitude_cols[0].replace('_magnitude', '')
+            self.sensor2_name = "sensor2"
+            self.force1_magnitude = df[magnitude_cols[0]].values
+            self.force2_magnitude = np.zeros_like(self.force1_magnitude)
+            self.force1_xyz = np.column_stack([self.force1_magnitude, np.zeros_like(self.force1_magnitude), np.zeros_like(self.force1_magnitude)])
+            self.force2_xyz = np.zeros((len(self.force1_magnitude), 3))
+        else:
+            raise ValueError(f"Cannot find force magnitude columns in {csv_path}")
+
+        logger.info(f"触觉数据加载完成:")
+        logger.info(f"  传感器1: {self.sensor1_name}")
+        logger.info(f"  传感器2: {self.sensor2_name}")
+        logger.info(f"  样本数: {len(self.timestamps)}")
+        logger.info(f"  时间范围: {self.timestamps[0]:.2f}s - {self.timestamps[-1]:.2f}s")
+        logger.info(f"  时间偏移: {time_offset:.3f}s")
+
+    def get_force_at_time(self, time_s: float) -> Tuple[Tuple[float, np.ndarray], Tuple[float, np.ndarray]]:
+        """
+        Get force values at specified time (with linear interpolation)
+
+        Args:
+            time_s: Timestamp in seconds
+
+        Returns:
+            ((force1_magnitude, force1_xyz), (force2_magnitude, force2_xyz))
+            where xyz is a 3-element numpy array [fx, fy, fz]
+        """
+        # Apply time offset
+        query_time = time_s - self.time_offset
+
+        # Boundary checks
+        if query_time < self.timestamps[0]:
+            # Before haptic data starts, return 0
+            return (0.0, np.zeros(3)), (0.0, np.zeros(3))
+        elif query_time > self.timestamps[-1]:
+            # Out of range, return last value
+            return (float(self.force1_magnitude[-1]), self.force1_xyz[-1]), \
+                   (float(self.force2_magnitude[-1]), self.force2_xyz[-1])
+
+        # Linear interpolation
+        idx = np.searchsorted(self.timestamps, query_time)
+        if idx == 0:
+            return (float(self.force1_magnitude[0]), self.force1_xyz[0]), \
+                   (float(self.force2_magnitude[0]), self.force2_xyz[0])
+
+        # Interpolate
+        t0, t1 = self.timestamps[idx-1], self.timestamps[idx]
+        f1_mag_0, f1_mag_1 = self.force1_magnitude[idx-1], self.force1_magnitude[idx]
+        f2_mag_0, f2_mag_1 = self.force2_magnitude[idx-1], self.force2_magnitude[idx]
+        f1_xyz_0, f1_xyz_1 = self.force1_xyz[idx-1], self.force1_xyz[idx]
+        f2_xyz_0, f2_xyz_1 = self.force2_xyz[idx-1], self.force2_xyz[idx]
+
+        alpha = (query_time - t0) / (t1 - t0)
+        force1_magnitude = f1_mag_0 + alpha * (f1_mag_1 - f1_mag_0)
+        force2_magnitude = f2_mag_0 + alpha * (f2_mag_1 - f2_mag_0)
+        force1_xyz = f1_xyz_0 + alpha * (f1_xyz_1 - f1_xyz_0)
+        force2_xyz = f2_xyz_0 + alpha * (f2_xyz_1 - f2_xyz_0)
+
+        return (float(force1_magnitude), force1_xyz), (float(force2_magnitude), force2_xyz)
+
+
 def convert(vrs_path: str,
-           mps_dir: str, 
+           mps_dir: str,
            out_dir: str,
            max_slop_ns: int = 5_000_000,
            fps: Optional[float] = None,
@@ -51,7 +177,9 @@ def convert(vrs_path: str,
            max_frames: Optional[int] = None,
            log_level: str = "INFO",
            create_visualization: bool = False,
-           rotate_visualization: bool = False) -> Dict[str, Any]:
+           rotate_visualization: bool = False,
+           haptic_csv: Optional[str] = None,
+           haptic_time_offset: float = 0.0) -> Dict[str, Any]:
     """
     Convert Aria VRS/MPS data to LeRobot dataset format
     
@@ -144,12 +272,30 @@ def convert(vrs_path: str,
             schema=schema,
             base_filename=f"episode_{episode_id:06d}"  # Standard LeRobot format
         )
-        
+
+        # Initialize haptic data loader if provided
+        haptic_loader = None
+        if haptic_csv is not None:
+            logger.info(f"Loading haptic data from {haptic_csv} with offset {haptic_time_offset}s")
+            haptic_loader = HapticDataLoader(haptic_csv, haptic_time_offset)
+
+        # Get start timestamp from first frame
+        start_timestamp_ns = 0
+        try:
+            first_frame = next(iter(_create_camera_frame_iterator(session, stride, 1)))
+            start_timestamp_ns = first_frame[0]
+            logger.info(f"Start timestamp: {start_timestamp_ns} ns")
+            # Recreate iterator for actual processing
+            frame_iterator = _create_camera_frame_iterator(session, stride, max_frames)
+        except StopIteration:
+            logger.warning("No frames found in stream")
+
         # Process frames
         logger.info("Starting frame processing...")
         processed_data = _process_frames(
-            session, frame_iterator, parquet_writer, 
-            progress, max_slop_ns, schema
+            session, frame_iterator, parquet_writer,
+            progress, max_slop_ns, schema,
+            start_timestamp_ns, haptic_loader
         )
         
         # Finalize parquet writing
@@ -228,7 +374,9 @@ def convert(vrs_path: str,
                     output_path=str(viz_output_path),
                     max_frames=max_frames,
                     stride=stride,
-                    rotate_image=rotate_visualization
+                    rotate_image=rotate_visualization,
+                    haptic_loader=haptic_loader,
+                    start_timestamp_ns=start_timestamp_ns
                 )
                 summary["visualization_video"] = str(viz_output_path)
                 logger.info(f"Visualization video created: {viz_output_path}")
@@ -415,9 +563,11 @@ def _process_frames(session: AriaSession,
                    parquet_writer: ParquetWriter,
                    progress: ConversionProgress,
                    max_slop_ns: int,
-                   schema: LeRobotSchema) -> Dict[str, Any]:
+                   schema: LeRobotSchema,
+                   start_timestamp_ns: int = 0,
+                   haptic_loader: Optional[HapticDataLoader] = None) -> Dict[str, Any]:
     """Process camera frames and extract aligned data"""
-    
+
     processed_data = {
         "valid_frames": 0,
         "dropped_frames": 0,
@@ -426,15 +576,17 @@ def _process_frames(session: AriaSession,
         "pose_stats": {"valid": 0, "total": 0},
         "nan_rates": {},
     }
-    
+
     step = 0
     episode_id = 0
-    
+    global_index = 0  # Global index across all episodes
+
     for timestamp_ns, image in frame_iterator:
         try:
             # Extract aligned data
             row_data = _extract_frame_data(
-                session, timestamp_ns, step, episode_id, max_slop_ns
+                session, timestamp_ns, step, episode_id, max_slop_ns,
+                start_timestamp_ns, haptic_loader, global_index
             )
             
             if row_data is None:
@@ -450,9 +602,10 @@ def _process_frames(session: AriaSession,
             
             # Update statistics
             _update_processing_stats(row_data, processed_data)
-            
+
             processed_data["valid_frames"] += 1
             step += 1
+            global_index += 1  # Increment global index
             progress.update(valid=True)
             
         except Exception as e:
@@ -471,13 +624,23 @@ def _extract_frame_data(session: AriaSession,
                        timestamp_ns: int,
                        step: int,
                        episode_id: int,
-                       max_slop_ns: int) -> Optional[Dict[str, Any]]:
+                       max_slop_ns: int,
+                       start_timestamp_ns: int = 0,
+                       haptic_loader: Optional[HapticDataLoader] = None,
+                       global_index: int = 0) -> Optional[Dict[str, Any]]:
     """Extract all aligned data for a single frame"""
-    
+
     # Base temporal data
+    time_s = (timestamp_ns - start_timestamp_ns) / 1e9
     row_data = {
-        "timestamp": timestamp_ns / 1e9,  # Convert to seconds
-        "timestamp_ns": timestamp_ns,
+        # LeRobot required index columns
+        "index": np.int64(global_index),
+        "episode_index": np.int64(episode_id),
+        "frame_index": np.int64(step),
+        "task_index": np.int64(0),  # Single task: aria_recording
+        # Temporal data
+        "timestamp": time_s,  # Relative time from episode start (for video sync)
+        "timestamp_ns": timestamp_ns,  # Absolute timestamp (device time)
         "episode_id": np.int32(episode_id),
         "step": np.int64(step),
     }
@@ -514,10 +677,35 @@ def _extract_frame_data(session: AriaSession,
         row_data["status.hands.valid_left"] = False
         row_data["status.hands.valid_right"] = False
     
-    # Add tactile placeholders
-    tactile_data = create_tactile_placeholders()
+    # Get haptic force values if loader is available
+    # force_left and force_right are tuples: (magnitude, xyz_array)
+    force_left, force_right = None, None
+    if haptic_loader:
+        force_left, force_right = haptic_loader.get_force_at_time(time_s)
+        # force_left = (magnitude, np.array([fx, fy, fz]))
+        # force_right = (magnitude, np.array([fx, fy, fz]))
+
+    # Add tactile data (real or placeholders)
+    tactile_data = create_tactile_placeholders(force_left, force_right)
     row_data.update(tactile_data)
-    
+
+    # Generate standard LeRobot columns for visualization compatibility
+    # observation.state: hand landmarks (63) + device pose (16) = 79 dims
+    observation_state = np.concatenate([
+        row_data["status.hands.landmarks_world"],  # 63 dims
+        row_data["status.pose.world_device"]       # 16 dims
+    ]).astype(np.float32)
+    row_data["observation.state"] = observation_state
+
+    # action: tactile forces [left_total, right_total, left_xyz(3), right_xyz(3)] = 8 dims
+    action = np.array([
+        row_data["action.tactile.left.force_total"],   # 1 dim
+        row_data["action.tactile.right.force_total"],  # 1 dim
+        *row_data["action.tactile.left.force_xyz"],    # 3 dims
+        *row_data["action.tactile.right.force_xyz"]    # 3 dims
+    ], dtype=np.float32)
+    row_data["action"] = action
+
     return row_data
 
 
@@ -559,21 +747,29 @@ def _encode_videos(video_frames: List[Tuple[int, np.ndarray]],
                   fps: float,
                   episode_id: int) -> List[Dict[str, Any]]:
     """Encode video frames to MP4 files"""
-    
+
     if not video_frames:
         logger.warning("No video frames to encode")
         return []
-    
+
     logger.info(f"Encoding {len(video_frames)} video frames...")
-    
+
+    # Get video shape from first frame (height, width, channels)
+    _, first_frame = video_frames[0]
+    video_shape = first_frame.shape  # (H, W, C)
+
     # Standard LeRobot format: episode-based video files
     from .video import encode_image_sequence
-    
+
     video_path = videos_dir / f"episode_{episode_id:06d}.mp4"
     metadata = encode_image_sequence(
         iter(video_frames), video_path, fps,
         codec="h264", quality="medium"
     )
+
+    # Add video shape to metadata
+    metadata["video_shape"] = video_shape
+
     return [metadata]
 
 
@@ -591,10 +787,16 @@ def _write_metadata_files(structure: Dict[str, Path],
     # Standard LeRobot metadata structure
     
     # meta/info.json
+    # Extract video shape from video metadata
+    video_shape = (224, 224, 3)  # Default
+    if video_metadata and "video_shape" in video_metadata[0]:
+        video_shape = tuple(video_metadata[0]["video_shape"])
+
     info_data = schema.get_info_json(
         fps=fps,
         episode_count=1,
         total_frames=parquet_metadata["total_rows"],
+        video_shape=video_shape,
         aria_session_info=session_info,
         conversion_time=time.time(),
         video_shards=len(video_metadata),
@@ -639,13 +841,50 @@ def _write_metadata_files(structure: Dict[str, Path],
         }
         f.write(json.dumps(episode_info) + "\n")
     written_files.append(str(episodes_file))
-    
+
+    # meta/episodes_stats.jsonl (per-episode statistics for LeRobot visualizer)
+    episodes_stats_file = structure["meta"] / "episodes_stats.jsonl"
+    with open(episodes_stats_file, 'w') as f:
+        # Convert global statistics to per-episode format
+        episode_stats = {
+            "episode_index": episode_id,
+            "stats": {}
+        }
+
+        # Convert each column's stats to the format expected by visualize_dataset
+        for col_name, col_stats in parquet_metadata["statistics"].items():
+            if col_name == "name":
+                continue
+
+            # For video columns, create placeholder stats
+            if col_name in schema.video_columns:
+                episode_stats["stats"][col_name] = {
+                    "min": [[[0.0]]] * 3,  # Per channel
+                    "max": [[[1.0]]] * 3,
+                    "mean": [[[0.5]]] * 3,
+                    "std": [[[0.2]]] * 3,
+                    "count": [parquet_metadata["total_rows"]]
+                }
+            # For regular columns
+            elif "min" in col_stats and "max" in col_stats:
+                # Wrap scalar values in lists to match LeRobot format
+                episode_stats["stats"][col_name] = {
+                    "min": [col_stats["min"]],
+                    "max": [col_stats["max"]],
+                    "mean": [col_stats["mean"]],
+                    "std": [col_stats["std"]],
+                    "count": [col_stats["count"]]
+                }
+
+        f.write(json.dumps(convert_numpy_types(episode_stats)) + "\n")
+    written_files.append(str(episodes_stats_file))
+
     # meta/tasks.jsonl (standard LeRobot format)
     tasks_file = structure["meta"] / "tasks.jsonl"
     with open(tasks_file, 'w') as f:
         task_info = {
             "task_index": 0,
-            "task_name": "aria_recording",
+            "task": "aria_recording",
             "task_description": "Project Aria multi-modal recording converted to LeRobot format"
         }
         f.write(json.dumps(task_info) + "\n")
