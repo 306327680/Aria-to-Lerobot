@@ -4,11 +4,11 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-production--ready-brightgreen.svg)](https://github.com)
 
-**将Project Aria VRS/MPS数据转换为标准LeRobot数据集格式，支持完整的多模态对齐和鲁棒的数据处理。**
+**将Project Aria VRS/MPS数据转换为标准LeRobot数据集格式，支持完整的多模态对齐和可视化功能。**
 
 > **🎯 完全符合LeRobot官方格式规范** - 生成的数据集采用标准的`data/chunk-000/`和`videos/chunk-000/observation.images.main/`目录结构，使用JSONL元数据格式，可直接被LeRobotDataset加载。
 
-基于可靠的`aria_api`构建，实现无缝数据访问，将复杂的Aria录制数据转换为标准化的LeRobot数据集，可直接用于机器学习工作流。
+基于可靠的`aria_api`构建，实现无缝数据访问，将复杂的Aria录制数据转换为标准化的LeRobot数据集，并提供带有手部关键点和眼动数据的可视化视频。
 
 ## ✨ 核心特性
 
@@ -19,11 +19,21 @@
 - 严格的模式验证和一致的数据类型
 
 ### 📊 **多模态数据**
-- **视觉**：RGB相机帧 → H.264/H.265编码视频
+- **视觉**：RGB相机帧 → H.264/H.265编码视频（10fps，正确颜色通道）
 - **空间**：世界坐标系下的设备位姿（SE3变换）
-- **手部**：世界坐标系下21点3D关键点（米为单位）
+- **手部**：世界坐标系下21点3D关键点（米为单位，Project Aria模型）
+- **眼动**：注视点投影到相机平面
 - **触觉**：预留动作占位符，带适当的掩码
 - **时间**：纳秒精度时间戳，设备时间对齐
+
+### 🎥 **可视化功能**
+- **手部关键点可视化**：21个关键点的骨骼连接（符合Project Aria规范）
+- **彩虹手指颜色**：不同手指使用不同颜色（红橙黄绿蓝紫白）
+- **眼动数据可视化**：注视点十字准星标记
+- **实时信息叠加**：帧号、时间戳、有效性统计
+- **双手区分显示**：左手亮色，右手暗色
+- **图像旋转支持**：可选顺时针90度旋转（仅影响可视化视频）
+- **独立可视化工具**：可单独生成可视化视频
 
 ### 🔄 **鲁棒处理**
 - **时间对齐**：内置最近邻查询，可配置容差
@@ -52,14 +62,17 @@ pip install pyarrow pandas opencv-python tqdm orjson
 ### 基础使用
 
 ```bash
-# 自动检测MPS目录转换
-python -m aria2lerobot glue.vrs output_dataset/
+# 基础转换
+python3 -m aria2lerobot glue.vrs output_dataset/
 
-# 显式指定MPS目录
-python -m aria2lerobot glue.vrs output_dataset/ --mps-dir mps_glue_vrs/
+# 带可视化转换
+python3 -m aria2lerobot glue.vrs output_dataset/ --create-visualization
 
-# 指定参数转换
-python -m aria2lerobot glue.vrs output_dataset/ --fps 30 --stride 2
+# 带旋转可视化转换
+python3 -m aria2lerobot glue.vrs output_dataset/ --create-visualization --rotate-visualization
+
+# 自定义参数转换
+python3 -m aria2lerobot glue.vrs output_dataset/ --fps 30 --stride 2 --create-visualization
 ```
 
 ### Python API使用
@@ -79,11 +92,13 @@ result = convert(
     vrs_path="glue.vrs", 
     mps_dir="mps_glue_vrs",
     out_dir="output_dataset",
-    fps=15.0,                    # 自定义FPS
-    max_slop_ns=10_000_000,     # 10ms对齐容差
-    stride=2,                    # 每隔一帧
-    max_frames=50000,           # 限制处理帧数
-    overwrite=True              # 覆盖现有输出
+    fps=15.0,                      # 自定义FPS
+    max_slop_ns=10_000_000,       # 10ms对齐容差
+    stride=2,                      # 每隔一帧
+    max_frames=50000,             # 限制处理帧数
+    overwrite=True,               # 覆盖现有输出
+    create_visualization=True,    # 生成可视化视频
+    rotate_visualization=True     # 旋转可视化视频90度
 )
 
 print(f"处理了 {result['processing']['valid_frames']} 帧")
@@ -112,6 +127,7 @@ output_dataset/
 │   ├── stats.json                    # 归一化数据统计
 │   ├── episodes.jsonl                # 剧集元数据（JSONL格式）
 │   └── tasks.jsonl                   # 任务描述信息
+├── visualization_with_annotations.mp4 # 可视化视频（可选）
 └── conversion.log                    # 详细转换日志
 ```
 
@@ -121,6 +137,51 @@ output_dataset/
 - **📋 JSONL元数据**：`episodes.jsonl`和`tasks.jsonl`采用标准JSONL格式
 - **🎥 相机分组**：视频按相机类型组织（`observation.images.main/`）
 - **📊 剧集导向**：每个剧集一个parquet和mp4文件对
+
+## 🔄 Aria到LeRobot数据映射
+
+### 数据源对应关系
+
+| Aria数据源 | LeRobot列名 | 数据类型 | 说明 |
+|------------|-------------|----------|------|
+| **相机数据** |
+| `camera-rgb`帧 | `observation.images.main` | 视频(MP4) | RGB相机帧，H.264编码 |
+| **位姿数据** |
+| MPS闭环轨迹 | `status.pose.world_device` | float32[16] | 世界→设备4×4变换矩阵(扁平化) |
+| 位姿有效性 | `status.pose.valid` | bool | 位姿数据是否有效 |
+| **手部跟踪** |
+| 手部21关键点(世界坐标) | `status.hands.landmarks_world` | float32[63] | 21×3关键点坐标扁平化(米) |
+| 左手有效性 | `status.hands.valid_left` | bool | 左手跟踪是否有效 |
+| 右手有效性 | `status.hands.valid_right` | bool | 右手跟踪是否有效 |
+| **触觉数据(占位符)** |
+| *暂无Aria触觉数据* | `action.tactile.left.force_total` | float32 | 左手总力(预留,填NaN) |
+| *暂无Aria触觉数据* | `action.tactile.right.force_total` | float32 | 右手总力(预留,填NaN) |
+| *暂无Aria触觉数据* | `action.tactile.left.force_xyz` | float32[3] | 左手力向量(预留,填NaN) |
+| *暂无Aria触觉数据* | `action.tactile.right.force_xyz` | float32[3] | 右手力向量(预留,填NaN) |
+| **触觉掩码** |
+| N/A | `action.mask.tactile.left.force_total` | bool | 左手总力掩码(恒为False) |
+| N/A | `action.mask.tactile.right.force_total` | bool | 右手总力掩码(恒为False) |
+| N/A | `action.mask.tactile.left.force_xyz` | bool[3] | 左手力向量掩码(恒为False) |
+| N/A | `action.mask.tactile.right.force_xyz` | bool[3] | 右手力向量掩码(恒为False) |
+
+### 重要说明
+
+#### 🤚 **触觉数据处理**
+- **当前状态**：Project Aria设备**不包含触觉传感器**
+- **LeRobot兼容性**：为保持LeRobot格式兼容性，预留了触觉动作列
+- **数据填充**：所有触觉列填充`NaN`值，对应掩码设为`False`
+- **未来扩展**：如果添加外部触觉设备，可通过修改转换器来填充真实数据
+
+#### 🌍 **坐标系统**
+- **设备坐标系**：以左眼SLAM相机为原点
+- **世界坐标系**：MPS重建的重力对齐世界坐标系
+- **变换处理**：所有坐标变换由`aria_api`自动处理
+- **单位统一**：位置使用米(m)，角度使用弧度(rad)
+
+#### ⏰ **时间对齐**
+- **主时间线**：以`camera-rgb`帧时间戳为基准
+- **对齐方式**：最近邻查询，默认5ms容差
+- **缺失处理**：超出容差的数据填充NaN，设置有效性标志为False
 
 ## 📊 数据模式
 
@@ -150,13 +211,15 @@ output_dataset/
 
 ### 触觉动作（占位符）
 
+> **⚠️ 重要说明**：Project Aria设备不包含触觉传感器。以下列为LeRobot格式兼容性而预留，数据全部为NaN。
+
 | 列名 | 类型 | 形状 | 描述 |
 |--------|------|-------|-------------|
-| `action.tactile.left.force_total` | float32 | () | 左手总力（NaN） |
-| `action.tactile.right.force_total` | float32 | () | 右手总力（NaN） |
-| `action.tactile.left.force_xyz` | float32 | (3,) | 左手力向量（NaN） |
-| `action.tactile.right.force_xyz` | float32 | (3,) | 右手力向量（NaN） |
-| `action.mask.tactile.*` | bool | () | 对应掩码（全为False） |
+| `action.tactile.left.force_total` | float32 | () | 左手总力（预留，填NaN） |
+| `action.tactile.right.force_total` | float32 | () | 右手总力（预留，填NaN） |
+| `action.tactile.left.force_xyz` | float32 | (3,) | 左手力向量（预留，填NaN） |
+| `action.tactile.right.force_xyz` | float32 | (3,) | 右手力向量（预留，填NaN） |
+| `action.mask.tactile.*` | bool | () | 对应掩码（恒为False，表示无有效数据） |
 
 ### 视频数据
 
@@ -169,7 +232,7 @@ output_dataset/
 ### 命令行参数
 
 ```bash
-python -m aria2lerobot --help
+python3 -m aria2lerobot --help
 
 # 关键选项:
 --fps FLOAT              # 目标FPS（未指定时自动检测）
@@ -179,6 +242,38 @@ python -m aria2lerobot --help
 --output-format FORMAT   # 输出格式选项（默认：标准LeRobot）
 --overwrite              # 覆盖现有输出
 --log-level LEVEL        # DEBUG、INFO、WARNING、ERROR
+--create-visualization   # 生成可视化视频
+--rotate-visualization   # 旋转可视化视频90度（仅影响可视化）
+```
+
+### 可视化功能详解
+
+转换器支持生成包含手部关键点和眼动数据的可视化视频：
+
+#### 🎨 可视化内容
+- **手部骨骼**：21个关键点连接线（符合Project Aria规范）
+  - 拇指：手腕(5) → 中间(6) → 远端(7) → 指尖(0) - **红色**
+  - 食指：手腕(5) → 近端(8) → 中间(9) → 远端(10) → 指尖(1) - **橙色**
+  - 中指：手腕(5) → 近端(11) → 中间(12) → 远端(13) → 指尖(2) - **黄色**
+  - 无名指：手腕(5) → 近端(14) → 中间(15) → 远端(16) → 指尖(3) - **绿色**
+  - 小指：手腕(5) → 近端(17) → 中间(18) → 远端(19) → 指尖(4) - **蓝色**
+  - 手掌：手腕(5) ↔ 手掌中心(20) ↔ 各手指根部 - **白色/紫色**
+- **眼动数据**：红色十字准星标记注视点
+- **颜色编码**：左手亮色，右手深色（便于区分）
+- **图像旋转**：可选顺时针90度旋转（仅影响可视化视频，不影响数据集）
+- **信息叠加**：帧号、时间戳、有效性统计
+
+#### 🔧 可视化参数
+```bash
+# 集成到转换过程
+--create-visualization   # 在转换同时生成可视化视频
+--rotate-visualization   # 旋转可视化视频90度（仅影响可视化）
+
+# 独立可视化工具参数
+--max-frames INT        # 最大处理帧数
+--stride INT           # 帧步长
+--rotate               # 旋转图像90度
+--verbose              # 详细日志输出
 ```
 
 ### 时间对齐
@@ -223,7 +318,13 @@ python -m aria2lerobot --help
 
 ```bash
 # 转换glue.vrs，自动检测MPS
-python -m aria2lerobot glue.vrs glue_dataset/
+python3 -m aria2lerobot glue.vrs glue_dataset/ --overwrite
+
+# 带可视化转换
+python3 -m aria2lerobot glue.vrs glue_dataset/ --overwrite --create-visualization
+
+# 带旋转可视化转换
+python3 -m aria2lerobot glue.vrs glue_dataset/ --overwrite --create-visualization --rotate-visualization
 ```
 
 预期输出：
@@ -247,11 +348,27 @@ python -m aria2lerobot glue.vrs glue_dataset/
 ### 自定义采样
 
 ```bash
-# 高质量30fps转换
-python -m aria2lerobot glue.vrs output/ --fps 30 --stride 1
+# 高质量转换带可视化
+python3 -m aria2lerobot glue.vrs output/ --fps 30 --stride 1 --create-visualization
 
-# 5fps快速预览
-python -m aria2lerobot glue.vrs preview/ --fps 5 --stride 6 --max-frames 1000
+# 高质量转换带旋转可视化
+python3 -m aria2lerobot glue.vrs output/ --fps 30 --stride 1 --create-visualization --rotate-visualization
+
+# 快速预览（少量帧数）
+python3 -m aria2lerobot glue.vrs preview/ --stride 20 --max-frames 50 --create-visualization
+```
+
+### 独立可视化工具
+
+```bash
+# 单独生成可视化视频（不进行数据转换）
+python3 aria2lerobot/visualize.py glue.vrs visualization_output.mp4 --max-frames 100 --stride 10
+
+# 单独生成旋转可视化视频
+python3 aria2lerobot/visualize.py glue.vrs rotated_output.mp4 --max-frames 100 --stride 10 --rotate
+
+# 带详细日志的可视化
+python3 aria2lerobot/visualize.py glue.vrs output.mp4 --verbose --max-frames 200
 ```
 
 ### 用LeRobot读取
@@ -276,6 +393,13 @@ print(f"视频帧形状: {sample['observation.images.main'].shape}")
 if sample['status.hands.valid_left']:
     landmarks = sample['status.hands.landmarks_world'].reshape(21, 3)
     print(f"左手手腕位置: {landmarks[20]}")  # 手腕是第20个点
+
+# 检查触觉数据（Aria设备无触觉传感器，数据为NaN）
+import numpy as np
+tactile_force = sample['action.tactile.left.force_total']
+tactile_mask = sample['action.mask.tactile.left.force_total']
+print(f"触觉数据: {tactile_force} (NaN: {np.isnan(tactile_force)})")
+print(f"触觉掩码: {tactile_mask}")  # 应该是False
 ```
 
 ### 批量处理
@@ -324,13 +448,13 @@ for vrs_file in vrs_files:
 **1. "未找到MPS目录"**
 ```bash
 # 解决方案：显式指定MPS目录
-python -m aria2lerobot data.vrs output/ --mps-dir path/to/mps_dir
+python3 -m aria2lerobot data.vrs output/ --mps-dir path/to/mps_dir
 ```
 
 **2. "高帧丢失率(>10%)"**
 ```bash
 # 解决方案：增加对齐容差
-python -m aria2lerobot data.vrs output/ --max-slop-ns 10000000  # 10ms
+python3 -m aria2lerobot data.vrs output/ --max-slop-ns 10000000  # 10ms
 ```
 
 **3. "低手部有效率(<50%)"**
@@ -343,11 +467,43 @@ python -m aria2lerobot data.vrs output/ --max-slop-ns 10000000  # 10ms
 - 限制处理：`--max-frames 10000`
 - 检查可用系统内存
 
+**5. "触觉数据全是NaN"**
+- 这是正常现象：Project Aria设备不包含触觉传感器
+- 触觉列仅为LeRobot格式兼容性预留
+- 所有触觉数据应为NaN，掩码应为False
+- 如需真实触觉数据，需要外部触觉设备和自定义集成
+
+**6. "视频FPS不正确或颜色反转"**
+- 已修复：FPS估算现在使用stride=1而非stride=10
+- 已修复：VRS RGB图像不再错误转换为BGR
+- 视频现在以正确的10fps和RGB颜色通道编码
+
+**7. "可视化视频中手部和眼动显示为N/A"**
+- 已修复：正确解析aria_api返回的元组格式
+- 手部投影：`(landmarks_2d, valid_mask)` 
+- 眼动投影：`(pixel_coords, depth, is_valid)`
+- 手部连接现在符合Project Aria 21点模型规范
+- 已添加彩虹色手指区分和畸变校正
+
+**8. "投影精度问题（畸变校正）"**
+- 已修复：集成Project Aria官方`CameraCalibration.project()`方法
+- 使用畸变感知投影替代简单针孔模型
+- 显著提高边缘区域的投影精度（差异可达0.2像素）
+- 自动检测并应用相机畸变参数
+
+**9. "可视化视频需要旋转90度"**
+- 已实现：可选顺时针90度图像旋转功能
+- 仅影响可视化视频，不影响LeRobot数据集
+- 实现方式：在原始图像上投影手部和眼动数据，然后旋转整个帧
+- 使用`cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)`进行旋转
+- CLI参数：`--rotate-visualization`（集成）或`--rotate`（独立）
+- 手部关键点和眼动数据在旋转后完美对齐
+
 #### 调试模式
 
 ```bash
 # 启用详细日志
-python -m aria2lerobot data.vrs output/ --log-level DEBUG
+python3 -m aria2lerobot data.vrs output/ --log-level DEBUG
 
 # 检查conversion.log获取详细信息
 tail -f output/conversion.log
@@ -360,7 +516,7 @@ tail -f output/conversion.log
 ```bash
 # 运行包含示例的烟雾测试
 cd examples/
-python smoke_test.py ../glue.vrs
+python3 smoke_test.py ../glue.vrs
 ```
 
 预期输出演示：
@@ -372,11 +528,11 @@ python smoke_test.py ../glue.vrs
 
 ```bash
 # 运行单元测试
-python -m pytest tests/ -v
+python3 -m pytest tests/ -v
 
 # 测试特定功能
-python -m pytest tests/test_schema.py -v
-python -m pytest tests/test_conversion.py -v
+python3 -m pytest tests/test_schema.py -v
+python3 -m pytest tests/test_conversion.py -v
 ```
 
 ## ✅ 标准LeRobot格式兼容性
@@ -467,8 +623,9 @@ aria2lerobot/
 ├── schema.py            # LeRobot模式定义
 ├── video.py             # H.264/H.265视频编码
 ├── io_parquet.py        # 增量parquet写入
+├── visualize.py         # 可视化视频生成（手部+眼动）
 ├── utils.py             # 日志记录、验证实用程序
-└── README_CN.md         # 本文件
+└── README.md            # 本文件
 ```
 
 ### 依赖
@@ -494,6 +651,12 @@ aria2lerobot/
 - [x] **标准LeRobot格式**：完全符合官方规范的输出格式
 - [x] **分块架构**：支持chunk-000/结构的可扩展数据集
 - [x] **JSONL元数据**：标准episodes.jsonl和tasks.jsonl格式
+- [x] **可视化功能**：手部关键点和眼动数据可视化视频
+- [x] **彩虹手指颜色**：不同手指使用不同颜色便于区分
+- [x] **FPS修复**：正确的FPS估算和RGB颜色通道处理
+- [x] **Project Aria兼容**：符合官方21点手部模型规范
+- [x] **畸变校正**：使用Project Aria官方投影函数提高精度
+- [x] **可视化旋转**：可选90度图像旋转（仅影响可视化视频）
 - [ ] **多剧集支持**：基于时间间隙自动剧集分割
 - [ ] **点云集成**：可选3D点云数据导出
 - [ ] **自定义动作空间**：用户定义的动作列模式

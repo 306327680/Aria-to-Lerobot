@@ -60,6 +60,12 @@ Examples:
     parser.add_argument("--episode-splits", type=int, nargs="*",
                        help="Frame indices to split episodes (space-separated)")
     
+    # Visualization
+    parser.add_argument("--create-visualization", action="store_true",
+                       help="Create visualization video with hand landmarks and gaze projections")
+    parser.add_argument("--rotate-visualization", action="store_true",
+                       help="Rotate visualization video 90 degrees clockwise")
+    
     # Logging
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], 
                        default="INFO", help="Logging level")
@@ -183,6 +189,8 @@ def main():
             stride=args.stride,
             max_frames=args.max_frames,
             log_level=args.log_level,
+            create_visualization=args.create_visualization,
+            rotate_visualization=args.rotate_visualization,
         )
         
         if not args.quiet:

@@ -33,6 +33,7 @@ from .utils import (
     setup_logging, validate_paths, create_output_structure,
     estimate_fps_from_timestamps, ConversionProgress, validate_conversion_output
 )
+from .visualize import create_visualization_video
 
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,9 @@ def convert(vrs_path: str,
            overwrite: bool = False,
            stride: int = 1,
            max_frames: Optional[int] = None,
-           log_level: str = "INFO") -> Dict[str, Any]:
+           log_level: str = "INFO",
+           create_visualization: bool = False,
+           rotate_visualization: bool = False) -> Dict[str, Any]:
     """
     Convert Aria VRS/MPS data to LeRobot dataset format
     
@@ -64,6 +67,8 @@ def convert(vrs_path: str,
         stride: Frame stride (1 = every frame, 2 = every other frame, etc.)
         max_frames: Maximum frames to process (None for all)
         log_level: Logging level
+        create_visualization: Create visualization video with hand landmarks and gaze projections
+        rotate_visualization: Rotate visualization video 90 degrees clockwise
     
     Returns:
         Conversion metadata dictionary
@@ -212,6 +217,25 @@ def convert(vrs_path: str,
         logger.info(f"Output: {len(parquet_metadata['shards'])} parquet + {len(video_metadata)} video files")
         logger.info(f"Time: {elapsed_time:.1f}s ({processed_data['valid_frames']/elapsed_time:.1f} fps)")
         
+        # Generate visualization video if requested
+        if create_visualization:
+            logger.info("Generating visualization video...")
+            try:
+                viz_output_path = out_dir / "visualization_with_annotations.mp4"
+                create_visualization_video(
+                    vrs_path=str(vrs_path),
+                    mps_dir=str(mps_dir),
+                    output_path=str(viz_output_path),
+                    max_frames=max_frames,
+                    stride=stride,
+                    rotate_image=rotate_visualization
+                )
+                summary["visualization_video"] = str(viz_output_path)
+                logger.info(f"Visualization video created: {viz_output_path}")
+            except Exception as e:
+                logger.warning(f"Failed to create visualization video: {e}")
+                summary["visualization_error"] = str(e)
+        
         return summary
         
     except Exception as e:
@@ -254,17 +278,47 @@ def _create_camera_frame_iterator(session: AriaSession,
     
     # Get total number of frames in stream
     try:
-        # Try to get frame count (if available in API)
-        total_stream_frames = session.vrs_data_provider.get_num_data_records(stream_id)
-    except Exception:
-        # Fallback: estimate from trajectory
+        # Get actual frame count from VRS stream
+        from aria_api.timestamps import TimeDomain
+        stream_id_obj = session.vrs_data_provider.get_stream_id_from_label(camera_label)
+        total_stream_frames = session.vrs_data_provider.get_num_data(stream_id_obj)
+        logger.info(f"Got actual frame count from VRS: {total_stream_frames}")
+    except Exception as e:
+        logger.warning(f"Could not get actual frame count: {e}")
+        # Fallback: estimate from trajectory but with better logic
         info = session.get_session_info()
         if 'trajectory_time_range_ns' in info:
             start_ns, end_ns = info['trajectory_time_range_ns']
             duration_s = (end_ns - start_ns) / 1e9
-            total_stream_frames = int(duration_s * 30)  # Estimate 30 FPS
+            # Try to estimate actual FPS from a small sample first
+            try:
+                sample_count = 0
+                sample_timestamps = []
+                for frame_idx in range(0, min(100, 10000), 10):  # Sample every 10th frame, up to 100 samples
+                    try:
+                        result = session.vrs_data_provider.get_image_data_by_index(stream_id, frame_idx)
+                        if result is not None:
+                            image_data, image_record = result[0], result[1]
+                            sample_timestamps.append(image_record.capture_timestamp_ns)
+                            sample_count += 1
+                    except:
+                        continue
+                    if sample_count >= 10:  # Enough samples
+                        break
+                
+                if len(sample_timestamps) >= 2:
+                    sample_duration = (sample_timestamps[-1] - sample_timestamps[0]) / 1e9
+                    estimated_fps = (len(sample_timestamps) - 1) / sample_duration if sample_duration > 0 else 10
+                    total_stream_frames = int(duration_s * estimated_fps)
+                    logger.info(f"Estimated FPS from samples: {estimated_fps:.2f}, frames: {total_stream_frames}")
+                else:
+                    total_stream_frames = int(duration_s * 10)  # Conservative 10 FPS fallback
+                    logger.warning(f"Using conservative 10 FPS estimate: {total_stream_frames}")
+            except Exception as sample_error:
+                logger.warning(f"Sample-based estimation failed: {sample_error}")
+                total_stream_frames = int(duration_s * 10)  # Conservative fallback
         else:
-            total_stream_frames = 10000  # Fallback estimate
+            total_stream_frames = 2000  # Conservative fallback
     
     logger.info(f"Estimated {total_stream_frames} frames in camera stream")
     
@@ -290,7 +344,7 @@ def _create_camera_frame_iterator(session: AriaSession,
             image_array = image_data.to_numpy_array()
             
             # Ensure RGB format
-            image_array = ensure_rgb_format(image_array, "bgr")  # Assume BGR from VRS
+            image_array = ensure_rgb_format(image_array, "rgb")  # VRS provides RGB format
             
             yield timestamp_ns, image_array
             processed_count += 1
@@ -307,19 +361,24 @@ def _create_camera_frame_iterator(session: AriaSession,
 def _estimate_total_frames(session: AriaSession, stride: int, max_frames: Optional[int]) -> int:
     """Estimate total number of frames to process"""
     try:
-        # Try to get from VRS stream
-        stream_id = session.vrs_data_provider.get_stream_id_from_label("camera-rgb")
-        total_frames = session.vrs_data_provider.get_num_data_records(stream_id)
-        total_frames = (total_frames + stride - 1) // stride  # Account for stride
-    except Exception:
-        # Fallback: estimate from session info
+        # Get actual frame count from VRS stream using correct API
+        camera_label = "camera-rgb"
+        stream_id_obj = session.vrs_data_provider.get_stream_id_from_label(camera_label)
+        actual_frames = session.vrs_data_provider.get_num_data(stream_id_obj)
+        total_frames = (actual_frames + stride - 1) // stride  # Account for stride
+        logger.info(f"Got actual frame count for estimation: {actual_frames}, with stride {stride} = {total_frames}")
+    except Exception as e:
+        logger.warning(f"Could not get actual frame count for estimation: {e}")
+        # Fallback: estimate from session info with better logic
         info = session.get_session_info()
         if 'trajectory_time_range_ns' in info:
             start_ns, end_ns = info['trajectory_time_range_ns']
             duration_s = (end_ns - start_ns) / 1e9
-            total_frames = int(duration_s * 30 / stride)  # Estimate 30 FPS
+            # Use conservative 10 FPS estimate instead of 30
+            total_frames = int(duration_s * 10 / stride)
+            logger.warning(f"Using fallback estimation: {duration_s:.1f}s * 10fps / {stride} = {total_frames}")
         else:
-            total_frames = 1000  # Fallback
+            total_frames = max(1000 // stride, 1)  # Conservative fallback
     
     if max_frames:
         total_frames = min(total_frames, max_frames)
@@ -330,9 +389,9 @@ def _estimate_total_frames(session: AriaSession, stride: int, max_frames: Option
 def _estimate_fps(session: AriaSession) -> float:
     """Estimate camera FPS from session data"""
     try:
-        # Get a sample of timestamps
+        # Get a sample of timestamps using consecutive frames (stride=1)
         sample_timestamps = []
-        frame_iterator = _create_camera_frame_iterator(session, stride=10, max_frames=100)
+        frame_iterator = _create_camera_frame_iterator(session, stride=1, max_frames=100)
         
         for timestamp_ns, _ in frame_iterator:
             sample_timestamps.append(timestamp_ns)
