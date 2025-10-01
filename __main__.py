@@ -72,6 +72,10 @@ Examples:
     parser.add_argument("--haptic-offset", type=float, default=0.0,
                        help="Time offset in seconds for haptic data alignment (default: 0.0)")
 
+    # Segment splitting
+    parser.add_argument("--split-csv", type=str,
+                       help="Path to segment split points CSV (from aria_haptic_align.py)")
+
     # Logging
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                        default="INFO", help="Logging level")
@@ -199,16 +203,28 @@ def main():
             rotate_visualization=args.rotate_visualization,
             haptic_csv=args.haptic_csv,
             haptic_time_offset=args.haptic_offset,
+            split_csv=args.split_csv,
         )
         
         if not args.quiet:
             print("\n✅ Conversion completed successfully!")
-            print(f"📊 Processed: {result['processing']['valid_frames']:,} frames")
-            print(f"⏱️  Time: {result['processing']['elapsed_time_s']:.1f}s")
-            print(f"🗂️  Files: {result['files']['parquet_shards']} parquet + {result['files']['video_shards']} video")
-            print(f"📈 Hand valid rate: {result['data_quality']['hand_valid_rate']:.1%}")
-            print(f"📈 Pose valid rate: {result['data_quality']['pose_valid_rate']:.1%}")
-            print(f"📂 Output directory: {args.output_dir}")
+
+            if result.get('mode') == 'chunked':
+                print(f"🔪 Split into {result['num_chunks']} chunks (episodes)")
+                print(f"📊 Processed: {result['processing']['valid_frames']:,} total frames")
+                print(f"⏱️  Time: {result['processing']['elapsed_time_s']:.1f}s")
+                print(f"📂 Output directory: {args.output_dir}")
+                for chunk_info in result['chunks']:
+                    frames = chunk_info.get('result', {}).get('processing', {}).get('valid_frames', 0)
+                    print(f"  - Episode {chunk_info['chunk_idx']}: {frames} frames ({chunk_info.get('start_time_s', 0):.1f}s - {chunk_info.get('end_time_s', 'end')}s)")
+            else:
+                print(f"📊 Processed: {result['processing']['valid_frames']:,} frames")
+                print(f"⏱️  Time: {result['processing']['elapsed_time_s']:.1f}s")
+                print(f"🗂️  Files: {result['files']['parquet_shards']} parquet + {result['files']['video_shards']} video")
+                if 'data_quality' in result:
+                    print(f"📈 Hand valid rate: {result['data_quality']['hand_valid_rate']:.1%}")
+                    print(f"📈 Pose valid rate: {result['data_quality']['pose_valid_rate']:.1%}")
+                print(f"📂 Output directory: {args.output_dir}")
         
         sys.exit(0)
         

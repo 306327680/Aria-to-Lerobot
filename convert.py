@@ -21,7 +21,6 @@ from dataclasses import asdict
 sys.path.insert(0, str(Path(__file__).parent.parent / "aria_api"))
 
 from aria_api import AriaSession
-from projectaria_tools.core.sensor_data import TimeDomain
 
 from .schema import (
     LeRobotSchema, LEROBOT_V3_SCHEMA, LEROBOT_V21_SCHEMA,
@@ -34,6 +33,11 @@ from .utils import (
     estimate_fps_from_timestamps, ConversionProgress, validate_conversion_output
 )
 from .visualize import create_visualization_video
+from .metadata import update_consolidated_metadata, write_single_episode_metadata
+from .frame_processing import process_frames
+from .chunking import (
+    process_all_chunks_single_pass, load_split_points, create_chunk_boundaries
+)
 
 # Haptic data support
 import pandas as pd
@@ -179,13 +183,17 @@ def convert(vrs_path: str,
            create_visualization: bool = False,
            rotate_visualization: bool = False,
            haptic_csv: Optional[str] = None,
-           haptic_time_offset: float = 0.0) -> Dict[str, Any]:
+           haptic_time_offset: float = 0.0,
+           split_csv: Optional[str] = None,
+           time_range_ns: Optional[tuple] = None,
+           chunk_id: Optional[int] = None,
+           global_index_offset: int = 0) -> Dict[str, Any]:
     """
     Convert Aria VRS/MPS data to LeRobot dataset format
-    
+
     Args:
         vrs_path: Path to VRS file
-        mps_dir: Path to MPS directory  
+        mps_dir: Path to MPS directory
         out_dir: Output directory for dataset
         max_slop_ns: Maximum time alignment tolerance (nanoseconds)
         fps: Target FPS (auto-detect if None)
@@ -197,7 +205,12 @@ def convert(vrs_path: str,
         log_level: Logging level
         create_visualization: Create visualization video with hand landmarks and gaze projections
         rotate_visualization: Rotate visualization video 90 degrees clockwise
-    
+        haptic_csv: Path to haptic sensor CSV file
+        haptic_time_offset: Time offset (seconds) to align haptic data with Aria data
+        split_csv: Path to segment split points CSV (from aria_haptic_align.py)
+        time_range_ns: Optional (start_ns, end_ns) tuple to filter frames by timestamp
+        chunk_id: Optional chunk ID for output naming
+
     Returns:
         Conversion metadata dictionary
     """
@@ -230,42 +243,152 @@ def convert(vrs_path: str,
         mps_dir = Path(mps_dir)
     
     out_dir = Path(out_dir)
-    
-    validation_errors = validate_paths(vrs_path, mps_dir, out_dir, overwrite)
-    if validation_errors:
-        for error in validation_errors:
-            logger.error(error)
-        raise ValueError(f"Validation failed: {validation_errors}")
+
+    # Skip validation if this is a chunk (chunk_id > 0) and directory already exists
+    # This allows multiple chunks to be written to the same directory
+    skip_validation = chunk_id is not None and chunk_id > 0 and out_dir.exists()
+
+    if not skip_validation:
+        validation_errors = validate_paths(vrs_path, mps_dir, out_dir, overwrite)
+        if validation_errors:
+            for error in validation_errors:
+                logger.error(error)
+            raise ValueError(f"Validation failed: {validation_errors}")
     
     # Create output structure
     structure = create_output_structure(out_dir, legacy_v21)
     schema = LEROBOT_V21_SCHEMA if legacy_v21 else LEROBOT_V3_SCHEMA
     
     start_time = time.time()
-    episode_id = 0  # Default episode ID
-    
+    # Use chunk_id as episode_id if provided, otherwise default to 0
+    episode_id = chunk_id if chunk_id is not None else 0
+
     try:
-        # Initialize Aria session
+        # Handle split CSV FIRST - if provided, recursively call convert() for each chunk
+        # This needs to happen before session initialization to avoid creating unnecessary sessions
+        if split_csv is not None:
+            # Initialize temporary session just for FPS estimation
+            temp_session = AriaSession.from_paths(vrs_path, mps_dir)
+            session_info = temp_session.get_session_info()
+
+            # Estimate FPS if not provided
+            if fps is None:
+                fps = _estimate_fps(temp_session)
+                fps = fps / stride  # Adjust for stride
+                logger.info(f"Auto-detected FPS: {fps:.2f} (adjusted for stride={stride})")
+
+            logger.info(f"Loading split points from {split_csv}")
+            import csv
+            split_times_s = []
+            with open(split_csv, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    split_time = float(row['split_time_s'])
+                    split_times_s.append(split_time)
+            logger.info(f"Loaded {len(split_times_s)} split points, creating {len(split_times_s) + 1} chunks")
+
+            # Get start timestamp
+            first_frame = next(iter(_create_camera_frame_iterator(temp_session, 1, 1)))
+            start_timestamp_ns = first_frame[0]
+
+            # Create chunks using frame time boundaries
+            # All chunks will be in the same output directory with different episode IDs
+            # Convert split times to timestamps (ns)
+            chunk_results = []
+            split_timestamps_ns = [int(split_time_s * 1e9) + start_timestamp_ns for split_time_s in split_times_s]
+            chunk_boundaries_ns = [start_timestamp_ns] + split_timestamps_ns + [None]
+
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing {len(chunk_boundaries_ns) - 1} chunks in SINGLE PASS (no VRS re-reading)")
+            logger.info(f"Output directory: {out_dir}")
+            logger.info(f"{'='*60}\n")
+
+            # Initialize Aria session ONCE for all chunks
+            logger.info("Initializing Aria session for single-pass processing...")
+            session = AriaSession.from_paths(vrs_path, mps_dir)
+            session_info = session.get_session_info()
+            logger.info(f"Session capabilities: {session_info['capabilities']}")
+
+            # Initialize haptic data loader if provided (shared across all chunks)
+            haptic_loader = None
+            if haptic_csv is not None:
+                logger.info(f"Loading haptic data from {haptic_csv} with offset {haptic_time_offset}s")
+                haptic_loader = HapticDataLoader(haptic_csv, haptic_time_offset)
+
+            # Process all chunks in ONE PASS through VRS
+            chunk_results = process_all_chunks_single_pass(
+                session=session,
+                chunk_boundaries_ns=chunk_boundaries_ns,
+                start_timestamp_ns=start_timestamp_ns,
+                structure=structure,
+                schema=schema,
+                max_slop_ns=max_slop_ns,
+                fps=fps,
+                stride=stride,
+                max_frames=max_frames,
+                haptic_loader=haptic_loader,
+                legacy_v21=legacy_v21,
+                create_camera_frame_iterator=_create_camera_frame_iterator,
+                encode_videos_func=_encode_videos
+            )
+
+            # Return summary of all chunks
+            total_frames = sum(r.get('result', {}).get('processing', {}).get('valid_frames', 0) for r in chunk_results)
+            total_time = sum(r.get('result', {}).get('processing', {}).get('elapsed_time_s', 0) for r in chunk_results)
+            total_parquet = sum(r.get('result', {}).get('files', {}).get('parquet_shards', 0) for r in chunk_results)
+            total_video = sum(r.get('result', {}).get('files', {}).get('video_shards', 0) for r in chunk_results)
+
+            # Update consolidated metadata after all chunks are processed
+            logger.info("Updating consolidated metadata...")
+            update_consolidated_metadata(
+                out_dir, chunk_results, session_info, fps,
+                len(chunk_results), total_frames, total_parquet, total_video,
+                schema
+            )
+
+            return {
+                'success': True,
+                'mode': 'chunked',
+                'num_chunks': len(chunk_results),
+                'chunks': chunk_results,
+                'processing': {
+                    'total_frames': total_frames,
+                    'valid_frames': total_frames,
+                    'elapsed_time_s': total_time,
+                },
+                'files': {
+                    'parquet_shards': total_parquet,
+                    'video_shards': total_video,
+                },
+                'data_quality': {
+                    'hand_valid_rate': 0.0,  # TODO: aggregate from chunks
+                    'pose_valid_rate': 0.0,  # TODO: aggregate from chunks
+                }
+            }
+
+        # Initialize Aria session (if not already done in split_csv mode)
         logger.info("Initializing Aria session...")
         session = AriaSession.from_paths(vrs_path, mps_dir)
-        
+
         session_info = session.get_session_info()
         logger.info(f"Session capabilities: {session_info['capabilities']}")
-        
+
         # Get camera frame iterator
         logger.info("Setting up camera frame iteration...")
         frame_iterator = _create_camera_frame_iterator(session, stride, max_frames)
-        
+
         # Estimate total frames and FPS
         total_frames = _estimate_total_frames(session, stride, max_frames)
         if fps is None:
             fps = _estimate_fps(session)
-        
-        logger.info(f"Estimated {total_frames} frames at {fps:.1f} FPS")
-        
+            # Adjust FPS for stride (if stride=10, output FPS is 1/10 of camera FPS)
+            fps = fps / stride
+
+        logger.info(f"Estimated {total_frames} frames at {fps:.1f} FPS (stride={stride})")
+
         # Initialize progress tracking
         progress = ConversionProgress(total_frames)
-        
+
         # Initialize data writers
         parquet_writer = ParquetWriter(
             output_dir=structure["data"],
@@ -280,6 +403,7 @@ def convert(vrs_path: str,
             haptic_loader = HapticDataLoader(haptic_csv, haptic_time_offset)
 
         # Get start timestamp from first frame
+        # This will be the global dataset start timestamp (same for all episodes)
         start_timestamp_ns = 0
         try:
             first_frame = next(iter(_create_camera_frame_iterator(session, stride, 1)))
@@ -290,12 +414,26 @@ def convert(vrs_path: str,
         except StopIteration:
             logger.warning("No frames found in stream")
 
+        # For chunks (time_range_ns is set), use the chunk's start as the episode start
+        # This ensures each episode's timestamps start from 0 (matching the video)
+        # For full recordings (no time_range_ns), use the global start timestamp
+        episode_start_timestamp_ns = start_timestamp_ns
+        if time_range_ns is not None:
+            episode_start_timestamp_ns = time_range_ns[0]
+            logger.info(f"Using episode start timestamp: {episode_start_timestamp_ns} ns (relative to chunk start)")
+
         # Process frames
         logger.info("Starting frame processing...")
-        processed_data = _process_frames(
+        if time_range_ns:
+            logger.info(f"Time range filter: {time_range_ns[0]} to {time_range_ns[1] if time_range_ns[1] else 'end'} ns")
+        processed_data = process_frames(
             session, frame_iterator, parquet_writer,
-            progress, max_slop_ns, schema,
-            start_timestamp_ns, haptic_loader
+            progress, max_slop_ns,
+            episode_start_timestamp_ns, haptic_loader,
+            time_range_ns=time_range_ns,
+            episode_id=episode_id,
+            global_index_start=global_index_offset,
+            fps=fps
         )
         
         # Finalize parquet writing
@@ -304,17 +442,20 @@ def convert(vrs_path: str,
         
         # Encode videos
         logger.info("Encoding videos...")
+        # Use chunk_id for naming if provided, otherwise use episode_id
+        video_id = chunk_id if chunk_id is not None else episode_id
         video_metadata = _encode_videos(
-            processed_data["video_frames"], 
+            processed_data["video_frames"],
             structure["video_main"],  # Use standard LeRobot video directory
-            fps, episode_id
+            fps, video_id
         )
         
         # Write metadata files
         logger.info("Writing metadata files...")
-        metadata_files = _write_metadata_files(
-            structure, schema, session_info, fps, 
-            parquet_metadata, video_metadata, episode_id
+        metadata_files = write_single_episode_metadata(
+            structure, schema, session_info, fps,
+            parquet_metadata, video_metadata, episode_id,
+            processed_data["valid_frames"]
         )
         
         # Final validation
@@ -427,7 +568,6 @@ def _create_camera_frame_iterator(session: AriaSession,
     # Get total number of frames in stream
     try:
         # Get actual frame count from VRS stream
-        from aria_api.timestamps import TimeDomain
         stream_id_obj = session.vrs_data_provider.get_stream_id_from_label(camera_label)
         total_stream_frames = session.vrs_data_provider.get_num_data(stream_id_obj)
         logger.info(f"Got actual frame count from VRS: {total_stream_frames}")
@@ -558,190 +698,6 @@ def _estimate_fps(session: AriaSession) -> float:
     return 30.0
 
 
-def _process_frames(session: AriaSession,
-                   frame_iterator: Iterator[Tuple[int, np.ndarray]],
-                   parquet_writer: ParquetWriter,
-                   progress: ConversionProgress,
-                   max_slop_ns: int,
-                   schema: LeRobotSchema,
-                   start_timestamp_ns: int = 0,
-                   haptic_loader: Optional[HapticDataLoader] = None) -> Dict[str, Any]:
-    """Process camera frames and extract aligned data"""
-
-    processed_data = {
-        "valid_frames": 0,
-        "dropped_frames": 0,
-        "video_frames": [],
-        "hand_stats": {"valid": 0, "total": 0},
-        "pose_stats": {"valid": 0, "total": 0},
-        "nan_rates": {},
-    }
-
-    step = 0
-    episode_id = 0
-    global_index = 0  # Global index across all episodes
-
-    for timestamp_ns, image in frame_iterator:
-        try:
-            # Extract aligned data
-            row_data = _extract_frame_data(
-                session, timestamp_ns, step, episode_id, max_slop_ns,
-                start_timestamp_ns, haptic_loader, global_index
-            )
-            
-            if row_data is None:
-                processed_data["dropped_frames"] += 1
-                progress.update(valid=False)
-                continue
-            
-            # Add to parquet
-            parquet_writer.add_row(row_data)
-            
-            # Store video frame
-            processed_data["video_frames"].append((timestamp_ns, image))
-            
-            # Update statistics
-            _update_processing_stats(row_data, processed_data)
-
-            processed_data["valid_frames"] += 1
-            step += 1
-            global_index += 1  # Increment global index
-            progress.update(valid=True)
-            
-        except Exception as e:
-            logger.debug(f"Failed to process frame at {timestamp_ns}: {e}")
-            processed_data["dropped_frames"] += 1
-            progress.update(valid=False)
-            continue
-    
-    # Finalize statistics
-    _finalize_processing_stats(processed_data)
-    
-    return processed_data
-
-
-def _extract_frame_data(session: AriaSession,
-                       timestamp_ns: int,
-                       step: int,
-                       episode_id: int,
-                       max_slop_ns: int,
-                       start_timestamp_ns: int = 0,
-                       haptic_loader: Optional[HapticDataLoader] = None,
-                       global_index: int = 0) -> Optional[Dict[str, Any]]:
-    """Extract all aligned data for a single frame"""
-
-    # Base temporal data
-    time_s = (timestamp_ns - start_timestamp_ns) / 1e9
-    row_data = {
-        # LeRobot required index columns
-        "index": np.int64(global_index),
-        "episode_index": np.int64(episode_id),
-        "frame_index": np.int64(step),
-        "task_index": np.int64(0),  # Single task: aria_recording
-        # Temporal data
-        "timestamp": time_s,  # Relative time from episode start (for video sync)
-        "timestamp_ns": timestamp_ns,  # Absolute timestamp (device time)
-        "episode_id": np.int32(episode_id),
-        "step": np.int64(step),
-    }
-    
-    # Extract pose data
-    pose = session.nearest_pose(timestamp_ns, max_slop_ns)
-    if pose is not None:
-        pose_matrix = pose.T_world_device.to_matrix()
-        row_data["status.pose.world_device"] = flatten_pose_matrix(pose_matrix)
-        row_data["status.pose.valid"] = True
-    else:
-        row_data["status.pose.world_device"] = np.full(16, np.nan, dtype=np.float32)
-        row_data["status.pose.valid"] = False
-    
-    # Extract hand data using the hands module interface
-    hands_data = session.nearest_hands(timestamp_ns, max_slop_ns)
-    if hands_data is not None and pose is not None:
-        # Get world coordinates using the hand projector
-        world_landmarks = session.hand_projector.landmarks_in_world(
-            timestamp_ns, pose.T_world_device, max_slop_ns=max_slop_ns
-        )
-        
-        left_landmarks = world_landmarks.get("left")
-        right_landmarks = world_landmarks.get("right")
-        
-        # For now, store only left hand landmarks (as per schema design)
-        flattened, valid_left, valid_right = flatten_hand_landmarks(left_landmarks, right_landmarks)
-        row_data["status.hands.landmarks_world"] = flattened
-        row_data["status.hands.valid_left"] = valid_left
-        row_data["status.hands.valid_right"] = valid_right
-    else:
-        # No hand data available
-        row_data["status.hands.landmarks_world"] = np.full(63, np.nan, dtype=np.float32)
-        row_data["status.hands.valid_left"] = False
-        row_data["status.hands.valid_right"] = False
-    
-    # Get haptic force values if loader is available
-    # force_left and force_right are tuples: (magnitude, xyz_array)
-    force_left, force_right = None, None
-    if haptic_loader:
-        force_left, force_right = haptic_loader.get_force_at_time(time_s)
-        # force_left = (magnitude, np.array([fx, fy, fz]))
-        # force_right = (magnitude, np.array([fx, fy, fz]))
-
-    # Add tactile data (real or placeholders)
-    tactile_data = create_tactile_placeholders(force_left, force_right)
-    row_data.update(tactile_data)
-
-    # Generate standard LeRobot columns for visualization compatibility
-    # observation.state: hand landmarks (63) + device pose (16) = 79 dims
-    observation_state = np.concatenate([
-        row_data["status.hands.landmarks_world"],  # 63 dims
-        row_data["status.pose.world_device"]       # 16 dims
-    ]).astype(np.float32)
-    row_data["observation.state"] = observation_state
-
-    # action: tactile forces [left_total, right_total, left_xyz(3), right_xyz(3)] = 8 dims
-    action = np.array([
-        row_data["action.tactile.left.force_total"],   # 1 dim
-        row_data["action.tactile.right.force_total"],  # 1 dim
-        *row_data["action.tactile.left.force_xyz"],    # 3 dims
-        *row_data["action.tactile.right.force_xyz"]    # 3 dims
-    ], dtype=np.float32)
-    row_data["action"] = action
-
-    return row_data
-
-
-def _update_processing_stats(row_data: Dict[str, Any], processed_data: Dict[str, Any]):
-    """Update processing statistics"""
-    
-    # Hand statistics
-    processed_data["hand_stats"]["total"] += 1
-    if row_data["status.hands.valid_left"] or row_data["status.hands.valid_right"]:
-        processed_data["hand_stats"]["valid"] += 1
-    
-    # Pose statistics  
-    processed_data["pose_stats"]["total"] += 1
-    if row_data["status.pose.valid"]:
-        processed_data["pose_stats"]["valid"] += 1
-
-
-def _finalize_processing_stats(processed_data: Dict[str, Any]):
-    """Finalize processing statistics"""
-    
-    # Compute rates
-    if processed_data["hand_stats"]["total"] > 0:
-        processed_data["hand_stats"]["valid_rate"] = (
-            processed_data["hand_stats"]["valid"] / processed_data["hand_stats"]["total"]
-        )
-    else:
-        processed_data["hand_stats"]["valid_rate"] = 0.0
-    
-    if processed_data["pose_stats"]["total"] > 0:
-        processed_data["pose_stats"]["valid_rate"] = (
-            processed_data["pose_stats"]["valid"] / processed_data["pose_stats"]["total"]
-        )
-    else:
-        processed_data["pose_stats"]["valid_rate"] = 0.0
-
-
 def _encode_videos(video_frames: List[Tuple[int, np.ndarray]],
                   videos_dir: Path,
                   fps: float,
@@ -773,122 +729,3 @@ def _encode_videos(video_frames: List[Tuple[int, np.ndarray]],
     return [metadata]
 
 
-def _write_metadata_files(structure: Dict[str, Path],
-                         schema: LeRobotSchema,
-                         session_info: Dict[str, Any],
-                         fps: float,
-                         parquet_metadata: Dict[str, Any],
-                         video_metadata: List[Dict[str, Any]],
-                         episode_id: int) -> List[str]:
-    """Write metadata files for the dataset"""
-    
-    written_files = []
-    
-    # Standard LeRobot metadata structure
-    
-    # meta/info.json
-    # Extract video shape from video metadata
-    video_shape = (224, 224, 3)  # Default
-    if video_metadata and "video_shape" in video_metadata[0]:
-        video_shape = tuple(video_metadata[0]["video_shape"])
-
-    info_data = schema.get_info_json(
-        fps=fps,
-        episode_count=1,
-        total_frames=parquet_metadata["total_rows"],
-        video_shape=video_shape,
-        aria_session_info=session_info,
-        conversion_time=time.time(),
-        video_shards=len(video_metadata),
-        parquet_shards=len(parquet_metadata["shards"]),
-    )
-    
-    info_file = structure["meta"] / "info.json"
-    with open(info_file, 'w') as f:
-        json.dump(info_data, f, indent=2)
-    written_files.append(str(info_file))
-    
-    # meta/stats.json
-    stats_file = structure["meta"] / "stats.json"
-    with open(stats_file, 'w') as f:
-        # Convert numpy types to native Python types for JSON serialization
-        def convert_numpy_types(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {k: convert_numpy_types(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy_types(v) for v in obj]
-            return obj
-        
-        json.dump(convert_numpy_types(parquet_metadata["statistics"]), f, indent=2)
-    written_files.append(str(stats_file))
-    
-    # meta/episodes.jsonl (standard LeRobot format)
-    episodes_file = structure["meta"] / "episodes.jsonl"
-    with open(episodes_file, 'w') as f:
-        episode_info = {
-            "episode_index": episode_id,
-            "episode_id": f"episode_{episode_id:06d}",
-            "length": parquet_metadata["total_rows"],
-            "timestamp_start": parquet_metadata["statistics"].get("timestamp", {}).get("min", 0),
-            "timestamp_end": parquet_metadata["statistics"].get("timestamp", {}).get("max", 0),
-            "task": "aria_recording"  # Default task name
-        }
-        f.write(json.dumps(episode_info) + "\n")
-    written_files.append(str(episodes_file))
-
-    # meta/episodes_stats.jsonl (per-episode statistics for LeRobot visualizer)
-    episodes_stats_file = structure["meta"] / "episodes_stats.jsonl"
-    with open(episodes_stats_file, 'w') as f:
-        # Convert global statistics to per-episode format
-        episode_stats = {
-            "episode_index": episode_id,
-            "stats": {}
-        }
-
-        # Convert each column's stats to the format expected by visualize_dataset
-        for col_name, col_stats in parquet_metadata["statistics"].items():
-            if col_name == "name":
-                continue
-
-            # For video columns, create placeholder stats
-            if col_name in schema.video_columns:
-                episode_stats["stats"][col_name] = {
-                    "min": [[[0.0]]] * 3,  # Per channel
-                    "max": [[[1.0]]] * 3,
-                    "mean": [[[0.5]]] * 3,
-                    "std": [[[0.2]]] * 3,
-                    "count": [parquet_metadata["total_rows"]]
-                }
-            # For regular columns
-            elif "min" in col_stats and "max" in col_stats:
-                # Wrap scalar values in lists to match LeRobot format
-                episode_stats["stats"][col_name] = {
-                    "min": [col_stats["min"]],
-                    "max": [col_stats["max"]],
-                    "mean": [col_stats["mean"]],
-                    "std": [col_stats["std"]],
-                    "count": [col_stats["count"]]
-                }
-
-        f.write(json.dumps(convert_numpy_types(episode_stats)) + "\n")
-    written_files.append(str(episodes_stats_file))
-
-    # meta/tasks.jsonl (standard LeRobot format)
-    tasks_file = structure["meta"] / "tasks.jsonl"
-    with open(tasks_file, 'w') as f:
-        task_info = {
-            "task_index": 0,
-            "task": "aria_recording",
-            "task_description": "Project Aria multi-modal recording converted to LeRobot format"
-        }
-        f.write(json.dumps(task_info) + "\n")
-    written_files.append(str(tasks_file))
-    
-    logger.info(f"Written metadata files: {written_files}")
-    return written_files
