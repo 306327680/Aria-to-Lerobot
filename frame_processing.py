@@ -58,6 +58,7 @@ def extract_frame_data(
         # LeRobot required index columns
         "index": np.int64(global_index),
         "episode_index": np.int64(episode_id),
+        "episode_chunk": np.int64(0),  # v3.0 required: chunk index (0 for single chunk)
         "frame_index": np.int64(step),
         "task_index": np.int64(0),  # Single task: aria_recording
         # Temporal data

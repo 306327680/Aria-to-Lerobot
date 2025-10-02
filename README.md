@@ -6,7 +6,7 @@
 
 **将Project Aria VRS/MPS数据转换为标准LeRobot数据集格式,支持完整的多模态对齐、触觉数据集成和可视化功能。**
 
-> **🎯 完全符合LeRobot官方格式规范** - 生成的数据集采用标准的`data/chunk-000/`和`videos/chunk-000/observation.images.main/`目录结构,使用JSONL元数据格式,可直接被LeRobotDataset加载。
+> **🎯 完全符合LeRobot v3.0格式规范** - 生成的数据集采用标准的`data/chunk-000/`和`videos/chunk-000/observation.images.main/`目录结构,使用Parquet元数据格式(tasks.parquet, episodes/),可直接被LeRobotDataset v0.3+加载和可视化。
 
 > **🆕 触觉传感器支持** - 支持集成外部触觉传感器数据(CSV格式),自动时间对齐,并在可视化视频中显示力度指示条。详见[触觉数据集成指南](README_HAPTIC.md)和[快速开始](QUICK_START.md)。
 
@@ -15,9 +15,10 @@
 ## ✨ 核心特性
 
 ### 🎯 **格式支持**
-- **标准LeRobot格式**：完全符合官方LeRobot数据集规范
+- **LeRobot v3.0格式**：完全符合官方LeRobot v3.0数据集规范
 - **分块架构**：支持`chunk-000/`结构的大数据集
-- **JSONL元数据**：标准`episodes.jsonl`和`tasks.jsonl`格式
+- **Parquet元数据**：v3.0标准格式 - `tasks.parquet`和`episodes/chunk-000/file-000.parquet`
+- **向后兼容**：可选v2.1格式支持（使用`--legacy-v21`）
 - 严格的模式验证和一致的数据类型
 
 ### 📊 **多模态数据**
@@ -36,6 +37,7 @@
 - **实时信息叠加**：帧号、时间戳、有效性统计
 - **双手区分显示**：左手亮色，右手暗色
 - **图像旋转支持**：可选顺时针90度旋转（仅影响可视化视频）
+- **多Episode可视化**：支持为每个episode生成单独的可视化视频
 - **独立可视化工具**：可单独生成可视化视频
 
 ### 🔄 **鲁棒处理**
@@ -151,7 +153,7 @@ print(f"手部有效率: {result['data_quality']['hand_valid_rate']:.1%}")
 
 ## 📁 输出结构
 
-### 标准LeRobot格式（符合官方规范）
+### LeRobot v3.0格式（符合官方规范）
 
 ```
 output_dataset/
@@ -168,19 +170,24 @@ output_dataset/
 │           └── ...
 ├── meta/
 │   ├── info.json                     # 模式定义、FPS、剧集信息
-│   ├── stats.json                    # 归一化数据统计
-│   ├── episodes.jsonl                # 剧集元数据（JSONL格式）
-│   └── tasks.jsonl                   # 任务描述信息
-├── visualization_with_annotations.mp4 # 可视化视频（可选）
+│   ├── stats.json                    # 数据统计（空文件，由LeRobot自动计算）
+│   ├── tasks.parquet                 # 任务描述（v3.0 Parquet格式）
+│   └── episodes/                     # 剧集元数据目录（v3.0新格式）
+│       └── chunk-000/
+│           └── file-000.parquet      # 剧集元数据（Parquet格式）
+├── visualization_episode_000000.mp4  # Episode 0可视化视频（可选，使用--create-visualization）
+├── visualization_episode_000001.mp4  # Episode 1可视化视频（多episode模式）
+├── ...                               # 更多episode可视化视频
 └── conversion.log                    # 详细转换日志
 ```
 
-### 关键格式特性
+### 关键格式特性（v3.0）
 
 - **📂 分块结构**：`chunk-000/`目录支持大数据集分块
-- **📋 JSONL元数据**：`episodes.jsonl`和`tasks.jsonl`采用标准JSONL格式
+- **📋 Parquet元数据**：v3.0使用`tasks.parquet`和`episodes/chunk-000/file-000.parquet`替代JSONL
 - **🎥 相机分组**：视频按相机类型组织（`observation.images.main/`）
 - **📊 剧集导向**：每个剧集一个parquet和mp4文件对
+- **🔄 LeRobot v0.3+兼容**：可直接使用`lerobot-dataset-viz`可视化
 
 ## 🔄 Aria到LeRobot数据映射
 
@@ -345,9 +352,9 @@ print(f"右手力度: {right_total:.2f}N [fx={right_xyz[0]:.2f}, fy={right_xyz[1
 | `--legacy-v21` | 标志 | 可选 | False | 使用LeRobot v2.1格式（默认v3.0） |
 | `--overwrite` | 标志 | 可选 | False | 覆盖已存在的输出目录 |
 | **剧集分割** |
-| `--episode-splits` | 整数列表 | 可选 | - | 剧集分割帧索引（空格分隔，未来功能） |
+| `--split-csv` | 字符串 | 可选 | - | CSV文件路径，包含episode分割时间点（split_time_s列） |
 | **可视化** |
-| `--create-visualization` | 标志 | 可选 | False | 生成带手部关键点和眼动的可视化视频 |
+| `--create-visualization` | 标志 | 可选 | False | 生成带手部关键点和眼动的可视化视频（多episode时为每个episode生成） |
 | `--rotate-visualization` | 标志 | 可选 | False | 将可视化视频旋转90度（仅影响可视化） |
 | **触觉数据** |
 | `--haptic-csv` | 字符串 | 可选 | - | 触觉传感器CSV文件路径 |
@@ -528,6 +535,35 @@ python3 visualize_with_haptics.py ../glue.vrs visualization.mp4 \
     --haptic-offset 1.31 \
     --max-force 150 \
     --max-frames 300
+```
+
+### 多Episode数据集转换与可视化
+
+```bash
+# 从父目录执行
+cd /media/echo/BU100/Aria_data
+
+# 使用CSV分割点创建多episode数据集，并为每个episode生成可视化视频
+python3 -m aria2lerobot pen.vrs output_pen \
+    --haptic-csv sensor_data/sequence_3_20250927_203243.csv \
+    --haptic-offset 1.15 \
+    --split-csv aria_haptic_alignment/pen_alignment_segments.csv \
+    --create-visualization \
+    --rotate-visualization \
+    --overwrite
+
+# CSV格式示例 (pen_alignment_segments.csv):
+# split_time_s
+# 6.2
+# 10.4
+# 14.8
+# ... (每行一个分割时间点，单位：秒)
+
+# 输出：
+# - 45个episode的parquet文件: episode_000000.parquet ~ episode_000044.parquet
+# - 45个episode的视频文件: episode_000000.mp4 ~ episode_000044.mp4
+# - 45个可视化视频: visualization_episode_000000.mp4 ~ visualization_episode_000044.mp4
+#   (每个视频显示对应episode的正确帧和触觉力度)
 ```
 
 ### 自定义采样
@@ -717,6 +753,19 @@ python3 -m aria2lerobot data.vrs output/ --max-slop-ns 10000000  # 10ms
 - CLI参数：`--rotate-visualization`（集成）或`--rotate`（独立）
 - 手部关键点和眼动数据在旋转后完美对齐
 
+**11. "多episode可视化视频内容重复/触觉数据错误"**
+- 已修复：每个episode的可视化视频现在从正确的VRS帧开始
+- 已修复：触觉数据使用全局起始时间戳进行正确对齐
+- 问题原因：
+  - 原先查找起始帧时受`max_frames`限制，导致后续episode找不到正确起始帧
+  - 触觉数据使用episode相对时间而非全局相对时间查询
+- 修复方案（visualize.py:346-369, 491）：
+  - 先在所有帧中查找`start_timestamp_ns`对应的起始帧
+  - 再根据`max_frames`限制处理帧数
+  - 添加`global_start_timestamp_ns`参数用于触觉数据全局时间对齐
+  - 触觉查询使用`(timestamp_ns - global_start_timestamp_ns)`而非`(timestamp_ns - start_timestamp_ns)`
+- 结果：45个episode的可视化视频正确显示不同内容和触觉力度
+
 #### 调试模式
 
 ```bash
@@ -766,22 +815,25 @@ cd aria2lerobot
 # - 验证报告
 ```
 
-## ✅ 标准LeRobot格式兼容性
+## ✅ LeRobot v3.0格式兼容性
 
 ### 格式规范符合性
 
-aria2lerobot完全符合官方LeRobot数据集格式规范，可直接被 `LeRobotDataset` 加载：
+aria2lerobot完全符合官方LeRobot v3.0数据集格式规范，可直接被 `LeRobotDataset` v0.3+加载：
 
 ```
 ✅ 目录结构: data/chunk-000/, videos/chunk-000/observation.images.main/
 ✅ 文件命名: episode_000000.parquet, episode_000000.mp4 (标准格式)
-✅ 元数据格式: episodes.jsonl, tasks.jsonl (JSONL格式)
-✅ info.json字段: codebase_version, data_path, video_path, features
-✅ 必需列: index, episode_index, frame_index (LeRobot v2.0+)
+✅ 元数据格式: tasks.parquet, episodes/chunk-000/file-000.parquet (v3.0 Parquet格式)
+✅ info.json字段: codebase_version="v3.0", data_path, video_path, features
+✅ 必需列: index, episode_index, episode_chunk, frame_index (LeRobot v3.0)
+✅ 数据路径模板: chunk-{chunk_index:03d}/episode_{file_index:06d}.parquet
+✅ 视频路径模板: chunk-{chunk_index:03d}/{video_key}/episode_{file_index:06d}.mp4
 ✅ 数据类型: 严格的PyArrow schema验证
-✅ 视频编码: H.264/H.265, RGB色彩空间
+✅ 视频编码: H.264/mp4v, RGB色彩空间
 ✅ 压缩格式: Zstandard压缩的Parquet文件
 ✅ 触觉数据: 兼容外部传感器CSV集成
+✅ 可视化兼容: lerobot-dataset-viz完全支持
 ```
 
 ### LeRobotDataset 加载测试
@@ -808,20 +860,30 @@ print(f"Frame: {sample['frame_index']}")
 ### 可视化工具兼容
 
 ```bash
-# 使用 LeRobot 官方可视化工具
-python -m lerobot.scripts.visualize_dataset \
-    --repo-id output \
+# 使用 LeRobot v0.3+ 官方可视化工具
+lerobot-dataset-viz \
+    --repo-id output_dataset \
+    --root /path/to/converted \
+    --episode-index 0
+
+# 或使用完整路径
+python -m lerobot.scripts.lerobot_dataset_viz \
+    --repo-id output_dataset \
     --root /path/to/converted \
     --episode-index 0
 ```
 
-### 与现有LeRobot工具兼容
+### 与现有LeRobot v0.3+工具兼容
 
 生成的数据集可直接用于：
-- **LeRobotDataset**: 标准数据加载器
+- **LeRobotDataset v0.3+**: 标准数据加载器
+- **lerobot-dataset-viz**: 官方数据集可视化工具
 - **Hugging Face Hub**: 数据集上传和共享
 - **LeRobot训练脚本**: 端到端策略训练
-- **数据可视化工具**: 内置的LeRobot可视化
+
+⚠️ **重要提示**:
+- v3.0格式数据集需要LeRobot v0.3或更高版本
+- 如需与旧版LeRobot兼容，使用`--legacy-v21`参数生成v2.1格式
 
 ## 🤝 与LeRobot集成
 
@@ -1076,9 +1138,11 @@ aria2lerobot/
 
 ### 计划功能
 
-- [x] **标准LeRobot格式**：完全符合官方规范的输出格式
+- [x] **LeRobot v3.0格式**：完全符合官方v3.0规范的输出格式
 - [x] **分块架构**：支持chunk-000/结构的可扩展数据集
-- [x] **JSONL元数据**：标准episodes.jsonl和tasks.jsonl格式
+- [x] **Parquet元数据**：v3.0标准tasks.parquet和episodes/格式
+- [x] **episode_chunk列**：v3.0必需的数据分片支持
+- [x] **路径模板**：正确的chunk_index和file_index参数格式
 - [x] **可视化功能**：手部关键点和眼动数据可视化视频
 - [x] **彩虹手指颜色**：不同手指使用不同颜色便于区分
 - [x] **FPS修复**：正确的FPS估算和RGB颜色通道处理
@@ -1086,7 +1150,9 @@ aria2lerobot/
 - [x] **畸变校正**：使用Project Aria官方投影函数提高精度
 - [x] **可视化旋转**：可选90度图像旋转（仅影响可视化视频）
 - [x] **触觉数据支持**：外部触觉传感器CSV集成和可视化
-- [ ] **多剧集支持**：基于时间间隙自动剧集分割
+- [x] **lerobot-dataset-viz兼容**：完全支持官方可视化工具
+- [x] **多剧集支持**：基于CSV分割点的多episode转换（--split-csv）
+- [x] **多episode可视化**：为每个episode生成独立可视化视频（正确的帧和触觉对齐）
 - [ ] **点云集成**：可选3D点云数据导出
 - [ ] **自定义动作空间**：用户定义的动作列模式
 - [ ] **分布式处理**：超大数据集的多进程转换

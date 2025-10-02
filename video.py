@@ -70,28 +70,47 @@ class VideoEncoder:
     def initialize(self, frame_shape: Tuple[int, int, int]):
         """Initialize video writer with first frame"""
         height, width, channels = frame_shape
-        
+
         if channels != 3:
             raise ValueError(f"Expected 3-channel image, got {channels}")
-        
+
         # Ensure output directory exists
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize VideoWriter
-        fourcc = self._get_fourcc()
-        self.writer = cv2.VideoWriter(
-            str(self.output_path),
-            fourcc,
-            self.fps,
-            (width, height),
-            isColor=True
-        )
-        
-        if not self.writer.isOpened():
-            raise RuntimeError(f"Failed to initialize video writer for {self.output_path}")
-        
-        self.is_initialized = True
-        logger.info(f"Initialized video encoder: {width}×{height} @ {self.fps} fps -> {self.output_path}")
+
+        # Try to initialize VideoWriter with fallback codecs
+        codecs_to_try = [self.codec, 'mp4v', 'avc1', 'x264']
+
+        for codec_name in codecs_to_try:
+            try:
+                if codec_name == 'avc1':
+                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                elif codec_name == 'x264':
+                    fourcc = cv2.VideoWriter_fourcc(*'X264')
+                elif codec_name in self.codec_map:
+                    fourcc = self.codec_map[codec_name]
+                else:
+                    continue
+
+                self.writer = cv2.VideoWriter(
+                    str(self.output_path),
+                    fourcc,
+                    self.fps,
+                    (width, height),
+                    isColor=True
+                )
+
+                if self.writer.isOpened():
+                    if codec_name != self.codec:
+                        logger.warning(f"Codec '{self.codec}' failed, using '{codec_name}' instead")
+                    self.codec = codec_name  # Update to working codec
+                    self.is_initialized = True
+                    logger.info(f"Initialized video encoder: {width}×{height} @ {self.fps} fps ({codec_name}) -> {self.output_path}")
+                    return
+            except Exception as e:
+                logger.debug(f"Codec {codec_name} failed: {e}")
+                continue
+
+        raise RuntimeError(f"Failed to initialize video writer for {self.output_path}. Tried codecs: {codecs_to_try}")
     
     def add_frame(self, frame: np.ndarray):
         """Add a frame to the video"""

@@ -3,9 +3,8 @@ Metadata generation for LeRobot datasets
 
 Handles creation of all metadata files required by LeRobot v3.0:
 - info.json
-- tasks.jsonl
-- episodes.jsonl
-- episodes_stats.jsonl
+- tasks.parquet
+- episodes/ (parquet files)
 - stats.json
 """
 
@@ -15,86 +14,119 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import time
 import numpy as np
+import pandas as pd
 
 from .schema import LeRobotSchema
 
 logger = logging.getLogger(__name__)
 
 
-def create_tasks_jsonl(meta_dir: Path) -> Path:
-    """Create tasks.jsonl metadata file
+def create_tasks_parquet(meta_dir: Path) -> Path:
+    """Create tasks.parquet metadata file (v3.0 format)
 
     Args:
         meta_dir: Path to meta directory
 
     Returns:
-        Path to created tasks.jsonl file
+        Path to created tasks.parquet file
     """
-    tasks_file = meta_dir / "tasks.jsonl"
-    with open(tasks_file, 'w') as f:
-        task_info = {
-            "task_index": 0,
-            "task": "aria_recording",
-            "task_description": "Project Aria multi-modal recording converted to LeRobot format"
-        }
-        f.write(json.dumps(task_info) + "\n")
+    tasks_file = meta_dir / "tasks.parquet"
+    task_data = pd.DataFrame([{
+        "task_index": 0,
+        "task": "aria_recording",
+        "task_description": "Project Aria multi-modal recording converted to LeRobot format"
+    }])
+    task_data.to_parquet(tasks_file, index=False)
 
-    logger.info("Created tasks.jsonl")
+    logger.info("Created tasks.parquet (v3.0 format)")
     return tasks_file
 
 
-def create_episodes_jsonl(meta_dir: Path, chunk_results: List[Dict], num_episodes: int) -> Path:
-    """Create episodes.jsonl metadata file
+def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episodes: int,
+                           video_keys: List[str] = None, fps: float = 10.0) -> Path:
+    """Create episodes parquet files (v3.0 format)
 
     Args:
         meta_dir: Path to meta directory
         chunk_results: List of chunk processing results
         num_episodes: Total number of episodes
+        video_keys: List of video keys (e.g., ['observation.images.main'])
 
     Returns:
-        Path to created episodes.jsonl file
+        Path to created episodes directory
     """
-    episodes_file = meta_dir / "episodes.jsonl"
-    with open(episodes_file, 'w') as f:
-        for i, chunk_result in enumerate(chunk_results):
-            # Get frame count from chunk result
-            frame_count = chunk_result.get('result', {}).get('processing', {}).get('valid_frames', 0)
-            episode_data = {
-                "episode_index": i,
-                "task_index": 0,
-                "task": "aria_recording",
-                "length": frame_count,
-            }
-            f.write(json.dumps(episode_data) + "\n")
+    episodes_dir = meta_dir / "episodes"
+    episodes_dir.mkdir(exist_ok=True, parents=True)
 
-    logger.info(f"Created episodes.jsonl with {num_episodes} episodes")
-    return episodes_file
+    if video_keys is None:
+        video_keys = ["observation.images.main"]
+
+    # Build episode records with v3.0 required fields
+    episode_records = []
+    cumulative_frames = 0
+
+    for i, chunk_result in enumerate(chunk_results):
+        # Get frame count from chunk result
+        frame_count = chunk_result.get('result', {}).get('processing', {}).get('valid_frames', 0)
+
+        # Calculate episode duration in seconds
+        episode_duration_s = float(frame_count) / fps if frame_count > 0 else 0.0
+
+        episode_data = {
+            "episode_index": i,
+            "task_index": 0,
+            "task": "aria_recording",
+            "length": frame_count,
+            # v3.0 required fields for data files
+            "data/chunk_index": 0,  # All in chunk 0 for now
+            "data/file_index": i,   # One file per episode
+            "dataset_from_index": cumulative_frames,
+            "dataset_to_index": cumulative_frames + frame_count,
+        }
+
+        # Add video file indices and timestamps for each video key
+        # Timestamps represent position in the concatenated video file (in seconds)
+        # For single-episode files: from=0.0, to=episode_duration
+        for vid_key in video_keys:
+            episode_data[f"videos/{vid_key}/chunk_index"] = 0
+            episode_data[f"videos/{vid_key}/file_index"] = i
+            episode_data[f"videos/{vid_key}/from_timestamp"] = 0.0  # Start of this video file
+            episode_data[f"videos/{vid_key}/to_timestamp"] = episode_duration_s  # End of this video file
+
+        episode_records.append(episode_data)
+        cumulative_frames += frame_count
+
+    # Write to parquet with v3.0 nested structure: meta/episodes/chunk-000/file-000.parquet
+    episodes_df = pd.DataFrame(episode_records)
+    chunk_dir = episodes_dir / "chunk-000"
+    chunk_dir.mkdir(exist_ok=True, parents=True)
+    episodes_file = chunk_dir / "file-000.parquet"
+    episodes_df.to_parquet(episodes_file, index=False)
+
+    logger.info(f"Created episodes/chunk-000/file-000.parquet with {num_episodes} episodes (v3.0 format)")
+    return episodes_dir
 
 
-def create_episodes_stats_jsonl(meta_dir: Path, num_episodes: int) -> Path:
-    """Create episodes_stats.jsonl metadata file
+def create_stats_json(meta_dir: Path) -> Path:
+    """Create stats.json metadata file (v3.0 format)
 
-    Creates empty stats entries that will be computed by LeRobot on first load.
+    Creates empty global stats that will be computed by LeRobot on first load.
 
     Args:
         meta_dir: Path to meta directory
-        num_episodes: Total number of episodes
 
     Returns:
-        Path to created episodes_stats.jsonl file
+        Path to created stats.json file
     """
-    episodes_stats_file = meta_dir / "episodes_stats.jsonl"
-    with open(episodes_stats_file, 'w') as f:
-        for i in range(num_episodes):
-            # Empty stats - will be computed by LeRobot
-            stats_data = {
-                "episode_index": i,
-                "stats": {}  # Empty dict - LeRobot will fill this in
-            }
-            f.write(json.dumps(stats_data) + "\n")
+    stats_file = meta_dir / "stats.json"
+    # Empty stats - will be computed by LeRobot on first load
+    stats_data = {}
 
-    logger.info(f"Created episodes_stats.jsonl with {num_episodes} episodes (stats will be computed by LeRobot)")
-    return episodes_stats_file
+    with open(stats_file, 'w') as f:
+        json.dump(stats_data, f, indent=2)
+
+    logger.info("Created stats.json (v3.0 format, stats will be computed by LeRobot)")
+    return stats_file
 
 
 def update_consolidated_metadata(
@@ -149,18 +181,19 @@ def update_consolidated_metadata(
         json.dump(info_data, f, indent=2)
     logger.info(f"Updated info.json with {num_episodes} episodes, {total_frames} total frames")
 
-    # Create metadata files
-    tasks_file = create_tasks_jsonl(meta_dir)
-    episodes_file = create_episodes_jsonl(meta_dir, chunk_results, num_episodes)
-    episodes_stats_file = create_episodes_stats_jsonl(meta_dir, num_episodes)
+    # Create metadata files (v3.0 format)
+    tasks_file = create_tasks_parquet(meta_dir)
+    episodes_dir = create_episodes_parquet(meta_dir, chunk_results, num_episodes,
+                                           video_keys=schema.video_columns, fps=fps)
+    stats_file = create_stats_json(meta_dir)
 
-    logger.info("Consolidated metadata update complete")
+    logger.info("Consolidated metadata update complete (v3.0 format)")
 
     return {
         "info.json": info_file,
-        "tasks.jsonl": tasks_file,
-        "episodes.jsonl": episodes_file,
-        "episodes_stats.jsonl": episodes_stats_file,
+        "tasks.parquet": tasks_file,
+        "episodes": episodes_dir,
+        "stats.json": stats_file,
     }
 
 
@@ -214,31 +247,25 @@ def write_single_episode_metadata(
         json.dump(info_data, f, indent=2)
     written_files.append(str(info_file))
 
-    # Create tasks.jsonl
-    tasks_file = create_tasks_jsonl(structure["meta"])
+    # Create tasks.parquet (v3.0)
+    tasks_file = create_tasks_parquet(structure["meta"])
     written_files.append(str(tasks_file))
 
-    # Create episodes.jsonl
-    episodes_file = structure["meta"] / "episodes.jsonl"
-    with open(episodes_file, 'w') as f:
-        episode_data = {
-            "episode_index": episode_id,
-            "task_index": 0,
-            "task": "aria_recording",
-            "length": total_frames,
+    # Create episodes parquet (v3.0)
+    chunk_results = [{
+        'result': {
+            'processing': {
+                'valid_frames': total_frames
+            }
         }
-        f.write(json.dumps(episode_data) + "\n")
-    written_files.append(str(episodes_file))
+    }]
+    video_keys = schema.video_columns  # Already a list
+    episodes_dir = create_episodes_parquet(structure["meta"], chunk_results, 1, video_keys, fps=fps)
+    written_files.append(str(episodes_dir))
 
-    # Create episodes_stats.jsonl
-    episodes_stats_file = structure["meta"] / "episodes_stats.jsonl"
-    with open(episodes_stats_file, 'w') as f:
-        stats_data = {
-            "episode_index": episode_id,
-            "stats": {}
-        }
-        f.write(json.dumps(stats_data) + "\n")
-    written_files.append(str(episodes_stats_file))
+    # Create stats.json (v3.0)
+    stats_file = create_stats_json(structure["meta"])
+    written_files.append(str(stats_file))
 
     logger.info(f"Written metadata files: {written_files}")
     return written_files

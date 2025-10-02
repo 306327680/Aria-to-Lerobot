@@ -329,7 +329,11 @@ def convert(vrs_path: str,
                 haptic_loader=haptic_loader,
                 legacy_v21=legacy_v21,
                 create_camera_frame_iterator=_create_camera_frame_iterator,
-                encode_videos_func=_encode_videos
+                encode_videos_func=_encode_videos,
+                create_visualization=create_visualization,
+                rotate_visualization=rotate_visualization,
+                vrs_path=str(vrs_path),
+                mps_dir=str(mps_dir)
             )
 
             # Return summary of all chunks

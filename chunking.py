@@ -13,6 +13,7 @@ import time
 from .io_parquet import ParquetWriter
 from .utils import ConversionProgress
 from .frame_processing import extract_frame_data as frame_extract, update_processing_stats
+from .visualize import create_visualization_video
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,11 @@ def process_all_chunks_single_pass(
     haptic_loader: Optional[Any],
     legacy_v21: bool,
     create_camera_frame_iterator,
-    encode_videos_func
+    encode_videos_func,
+    create_visualization: bool = False,
+    rotate_visualization: bool = False,
+    vrs_path: Optional[str] = None,
+    mps_dir: Optional[str] = None
 ) -> List[Dict]:
     """
     Process all chunks in a SINGLE PASS through VRS file.
@@ -162,6 +167,44 @@ def process_all_chunks_single_pass(
         # Write video for this chunk
         if data["video_frames"]:
             encode_videos_func(data["video_frames"], structure["video_main"], fps, chunk_idx)
+
+        # Generate visualization video for this episode if requested
+        if create_visualization and vrs_path and mps_dir:
+            logger.info(f"Generating visualization for episode {chunk_idx}...")
+            try:
+                # Get output directory from structure
+                out_dir = structure["root"]
+                viz_output_path = out_dir / f"visualization_episode_{chunk_idx:06d}.mp4"
+
+                # Calculate time range for this episode
+                start_time_s = (chunk_boundaries_ns[chunk_idx] - start_timestamp_ns) / 1e9
+                if chunk_boundaries_ns[chunk_idx + 1] is None:
+                    # Last chunk - use all remaining frames
+                    end_time_s = None
+                    max_viz_frames = None
+                else:
+                    end_time_s = (chunk_boundaries_ns[chunk_idx + 1] - start_timestamp_ns) / 1e9
+                    # Estimate frames in this time range
+                    duration_s = end_time_s - start_time_s
+                    max_viz_frames = int(duration_s * fps) + 10  # Add buffer
+
+                # Calculate start timestamp for visualization
+                start_ts_ns = chunk_boundaries_ns[chunk_idx]
+
+                create_visualization_video(
+                    vrs_path=vrs_path,
+                    mps_dir=mps_dir,
+                    output_path=str(viz_output_path),
+                    max_frames=max_viz_frames,
+                    stride=stride,
+                    rotate_image=rotate_visualization,
+                    haptic_loader=haptic_loader,
+                    start_timestamp_ns=start_ts_ns,
+                    global_start_timestamp_ns=start_timestamp_ns  # Use global start for haptic data alignment
+                )
+                logger.info(f"Visualization for episode {chunk_idx} created: {viz_output_path}")
+            except Exception as e:
+                logger.warning(f"Failed to create visualization for episode {chunk_idx}: {e}")
 
         # Calculate statistics
         if data["hand_stats"]["total"] > 0:

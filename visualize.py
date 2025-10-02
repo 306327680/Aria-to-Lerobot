@@ -311,7 +311,8 @@ def create_visualization_video(vrs_path: str,
                               stride: int = 1,
                               rotate_image: bool = False,
                               haptic_loader = None,
-                              start_timestamp_ns: int = 0) -> None:
+                              start_timestamp_ns: int = 0,
+                              global_start_timestamp_ns: int = None) -> None:
     """
     创建可视化视频
 
@@ -323,13 +324,18 @@ def create_visualization_video(vrs_path: str,
         stride: 帧间隔
         rotate_image: 是否顺时针旋转90度
         haptic_loader: 触觉数据加载器（可选）
-        start_timestamp_ns: 起始时间戳（纳秒）
+        start_timestamp_ns: 起始时间戳（纳秒），用于定位VRS中的起始帧
+        global_start_timestamp_ns: 全局起始时间戳（纳秒），用于计算触觉数据的相对时间。如果为None，则使用start_timestamp_ns
     """
     logger.info(f"创建可视化视频...")
     logger.info(f"VRS文件: {vrs_path}")
     logger.info(f"MPS目录: {mps_dir}")
     logger.info(f"输出路径: {output_path}")
-    
+
+    # If global_start_timestamp_ns is not provided, use start_timestamp_ns
+    if global_start_timestamp_ns is None:
+        global_start_timestamp_ns = start_timestamp_ns
+
     # 初始化Aria session
     session = AriaSession.from_paths(vrs_path, mps_dir)
     
@@ -337,22 +343,69 @@ def create_visualization_video(vrs_path: str,
     camera_label = "camera-rgb"
     stream_id = session.vrs_data_provider.get_stream_id_from_label(camera_label)
     total_frames = session.vrs_data_provider.get_num_data(stream_id)
-    
+
+    logger.info(f"VRS总帧数: {total_frames}, 步长: {stride}")
+
+    # 找到起始帧索引（基于start_timestamp_ns）
+    start_frame_idx = 0
+    if start_timestamp_ns > 0:
+        # 使用二分搜索快速定位起始帧（避免读取所有帧）
+        left, right = 0, total_frames - 1
+        found_idx = 0
+
+        while left <= right:
+            mid = (left + right) // 2
+            try:
+                result = session.vrs_data_provider.get_image_data_by_index(stream_id, mid)
+                if result is None:
+                    # Frame not available, try next
+                    left = mid + 1
+                    continue
+
+                image_record = result[1]
+                mid_timestamp = image_record.capture_timestamp_ns
+
+                if mid_timestamp < start_timestamp_ns:
+                    # Target is in the right half
+                    left = mid + 1
+                elif mid_timestamp >= start_timestamp_ns:
+                    # This could be our target, but check if there's an earlier one
+                    found_idx = mid
+                    right = mid - 1
+            except Exception as e:
+                logger.debug(f"Error reading frame {mid}: {e}")
+                left = mid + 1
+
+        start_frame_idx = found_idx
+
+        # Verify the found frame
+        try:
+            result = session.vrs_data_provider.get_image_data_by_index(stream_id, start_frame_idx)
+            if result is not None:
+                image_record = result[1]
+                logger.info(f"找到起始帧: idx={start_frame_idx}, ts={image_record.capture_timestamp_ns} (target={start_timestamp_ns})")
+        except Exception as e:
+            logger.warning(f"无法验证起始帧 {start_frame_idx}: {e}")
+
+    # 计算实际要处理的帧数
+    available_frames = total_frames - start_frame_idx
     if max_frames:
-        total_frames = min(total_frames, max_frames)
-    
-    logger.info(f"总帧数: {total_frames}, 步长: {stride}")
-    
+        frames_to_process = min(available_frames, max_frames)
+    else:
+        frames_to_process = available_frames
+
+    logger.info(f"从帧 {start_frame_idx} 开始，处理 {frames_to_process} 帧 (可用帧数: {available_frames})")
+
     # 初始化视频写入器
     writer = None
     fps = 10.0  # 固定10fps
-    
+
     processed_frames = 0
     valid_hands = 0
     valid_gaze = 0
-    
+
     # 处理帧
-    for frame_idx in tqdm(range(0, total_frames, stride), desc="Processing frames"):
+    for frame_idx in tqdm(range(start_frame_idx, start_frame_idx + frames_to_process, stride), desc="Processing frames"):
         try:
             # 获取图像
             result = session.vrs_data_provider.get_image_data_by_index(stream_id, frame_idx)
@@ -459,8 +512,8 @@ def create_visualization_video(vrs_path: str,
 
             # 绘制力度指示条（在旋转后的图像上）
             if haptic_loader is not None:
-                # 计算相对时间（从起始时间戳开始）
-                time_s = (timestamp_ns - start_timestamp_ns) / 1e9
+                # 计算相对时间（从全局起始时间戳开始）
+                time_s = (timestamp_ns - global_start_timestamp_ns) / 1e9
                 # get_force_at_time returns ((mag1, xyz1), (mag2, xyz2))
                 (force_left, _), (force_right, _) = haptic_loader.get_force_at_time(time_s)
                 image_bgr = draw_force_bars(image_bgr, force_left, force_right)

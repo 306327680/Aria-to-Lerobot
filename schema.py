@@ -119,8 +119,8 @@ class LeRobotSchema:
             }
 
         info = {
-            # Core metadata - v2.1 format
-            "codebase_version": "v2.1",  # Match debug dataset format
+            # Core metadata - v3.0 format
+            "codebase_version": "v3.0",
             "total_episodes": episode_count,
             "total_frames": total_frames,
             "total_tasks": 1,  # Single task (aria_recording)
@@ -130,8 +130,8 @@ class LeRobotSchema:
             "fps": fps,
 
             # Data paths
-            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+            "data_path": "data/chunk-{chunk_index:03d}/episode_{file_index:06d}.parquet",
+            "video_path": "videos/chunk-{chunk_index:03d}/{video_key}/episode_{file_index:06d}.mp4",
 
             # v2.1 features schema (compatible with visualize_dataset)
             "features": features
@@ -164,6 +164,7 @@ LEROBOT_V3_SCHEMA = LeRobotSchema(
         # Core temporal columns
         "index": ColumnSpec((), "int64", "Global index across all episodes"),
         "episode_index": ColumnSpec((), "int64", "Episode index (same as episode_id)"),
+        "episode_chunk": ColumnSpec((), "int64", "Episode chunk index for sharding"),
         "frame_index": ColumnSpec((), "int64", "Frame index within episode (same as step)"),
         "task_index": ColumnSpec((), "int64", "Task index"),
         "timestamp": ColumnSpec((), "float64", "Timestamp in seconds"),
@@ -198,7 +199,7 @@ LEROBOT_V3_SCHEMA = LeRobotSchema(
         "status.pose.valid": ColumnSpec((), "bool", "Pose validity flag"),
     },
     required_columns=[
-        "index", "episode_index", "frame_index", "task_index",
+        "index", "episode_index", "episode_chunk", "frame_index", "task_index",
         "timestamp", "timestamp_ns", "episode_id", "step",
         "observation.state", "action"  # Standard LeRobot columns
     ],
