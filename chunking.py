@@ -122,7 +122,7 @@ def process_all_chunks_single_pass(
         frame_data = frame_extract(
             session, timestamp_ns, data["step"], chunk_idx,
             max_slop_ns, chunk_start_ns, haptic_loader,
-            global_index, fps
+            global_index, fps, start_timestamp_ns  # Pass global start timestamp for haptic alignment
         )
 
         if frame_data is not None:

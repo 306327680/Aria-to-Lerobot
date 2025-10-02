@@ -26,7 +26,8 @@ def extract_frame_data(
     start_timestamp_ns: int,
     haptic_loader: Optional[Any],
     global_index: int,
-    fps: float
+    fps: float,
+    global_start_timestamp_ns: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
     """Extract all aligned data for a single frame
 
@@ -36,10 +37,11 @@ def extract_frame_data(
         step: Frame index within episode
         episode_id: Episode ID
         max_slop_ns: Maximum time alignment tolerance
-        start_timestamp_ns: Episode start timestamp (unused, kept for compatibility)
+        start_timestamp_ns: Episode start timestamp (for video sync)
         haptic_loader: Optional HapticDataLoader instance
         global_index: Global frame index across all episodes
         fps: Frames per second
+        global_start_timestamp_ns: Global dataset start timestamp (for haptic alignment)
 
     Returns:
         Dictionary of frame data, or None if extraction failed
@@ -47,6 +49,11 @@ def extract_frame_data(
     # Base temporal data - use step/fps to ensure timestamps start from 0 and increment uniformly
     # This ensures perfect alignment with video frames
     time_s = step / fps
+
+    # For haptic data, use global timestamp relative to dataset start
+    if global_start_timestamp_ns is None:
+        global_start_timestamp_ns = start_timestamp_ns  # Fallback to episode start
+    haptic_query_time_s = (timestamp_ns - global_start_timestamp_ns) / 1e9
     row_data = {
         # LeRobot required index columns
         "index": np.int64(global_index),
@@ -93,9 +100,10 @@ def extract_frame_data(
         row_data["status.hands.valid_right"] = False
 
     # Get haptic force values if loader is available
+    # Use global timestamp for haptic alignment (not episode-relative time)
     force_left, force_right = None, None
     if haptic_loader:
-        force_left, force_right = haptic_loader.get_force_at_time(time_s)
+        force_left, force_right = haptic_loader.get_force_at_time(haptic_query_time_s)
 
     # Add tactile data (real or placeholders)
     tactile_data = create_tactile_placeholders(force_left, force_right)
@@ -221,7 +229,8 @@ def process_frames(
             # Extract aligned data
             row_data = extract_frame_data(
                 session, timestamp_ns, step, episode_id, max_slop_ns,
-                start_timestamp_ns, haptic_loader, global_index, fps
+                start_timestamp_ns, haptic_loader, global_index, fps,
+                start_timestamp_ns  # For single episode, start_timestamp_ns is also global start
             )
 
             if row_data is None:

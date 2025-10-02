@@ -157,37 +157,37 @@ def video_encoder_context(*args, **kwargs):
         encoder.finalize()
 
 
-def encode_image_sequence(images: Iterator[Tuple[int, np.ndarray]], 
+def encode_image_sequence(images: Iterator[Tuple[float, np.ndarray]],
                          output_path: Path,
                          fps: float,
                          **encoder_kwargs) -> Dict[str, Any]:
     """
     Encode a sequence of images to video
-    
+
     Args:
-        images: Iterator of (timestamp_ns, image) tuples
+        images: Iterator of (timestamp_s, image) tuples (relative timestamps in seconds)
         output_path: Output video path
         fps: Target FPS
         **encoder_kwargs: Additional encoder parameters
-    
+
     Returns:
         Encoding metadata
     """
     with video_encoder_context(output_path, fps=fps, **encoder_kwargs) as encoder:
         frame_count = 0
         timestamps = []
-        
-        for timestamp_ns, image in images:
+
+        for timestamp_s, image in images:
             encoder.add_frame(image)
-            timestamps.append(timestamp_ns)
+            timestamps.append(timestamp_s)
             frame_count += 1
-        
+
         metadata = encoder.finalize()
         metadata.update({
-            "timestamps_ns": timestamps,
+            "timestamps_s": timestamps,
             "actual_frame_count": frame_count,
         })
-        
+
         return metadata
 
 

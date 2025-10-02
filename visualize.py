@@ -430,11 +430,18 @@ def create_visualization_video(vrs_path: str,
                     # API返回tuple格式: (pixel_coords, depth, valid)
                     gaze_point, depth, is_valid = gaze_result
                     if is_valid:
+                        # Ensure gaze_point is properly unpacked and converted to float
+                        if isinstance(gaze_point, (tuple, list)):
+                            gaze_u, gaze_v = float(gaze_point[0]), float(gaze_point[1])
+                        else:
+                            # numpy array
+                            gaze_u, gaze_v = float(gaze_point[0]), float(gaze_point[1])
+
                         image_bgr = draw_gaze_point(
-                            image_bgr, gaze_point,
+                            image_bgr, (gaze_u, gaze_v),
                             color=(0, 0, 255), radius=8
                         )
-                        gaze_info = f"Gaze: ({gaze_point[0]:.0f}, {gaze_point[1]:.0f})"
+                        gaze_info = f"Gaze: ({gaze_u:.0f}, {gaze_v:.0f})"
                         valid_gaze += 1
             except Exception as e:
                 logger.debug(f"眼动投影失败: {e}")
@@ -454,7 +461,8 @@ def create_visualization_video(vrs_path: str,
             if haptic_loader is not None:
                 # 计算相对时间（从起始时间戳开始）
                 time_s = (timestamp_ns - start_timestamp_ns) / 1e9
-                force_left, force_right = haptic_loader.get_force_at_time(time_s)
+                # get_force_at_time returns ((mag1, xyz1), (mag2, xyz2))
+                (force_left, _), (force_right, _) = haptic_loader.get_force_at_time(time_s)
                 image_bgr = draw_force_bars(image_bgr, force_left, force_right)
             
             # 写入视频帧
@@ -462,7 +470,9 @@ def create_visualization_video(vrs_path: str,
             processed_frames += 1
             
         except Exception as e:
+            import traceback
             logger.warning(f"处理帧 {frame_idx} 失败: {e}")
+            logger.debug(f"详细错误信息:\n{traceback.format_exc()}")
             continue
     
     # 清理
