@@ -129,9 +129,9 @@ class LeRobotSchema:
             "chunks_size": 1000,
             "fps": fps,
 
-            # Data paths
-            "data_path": "data/chunk-{chunk_index:03d}/episode_{file_index:06d}.parquet",
-            "video_path": "videos/chunk-{chunk_index:03d}/{video_key}/episode_{file_index:06d}.mp4",
+            # Data paths (use GR00T-compatible variable names)
+            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
 
             # v2.1 features schema (compatible with visualize_dataset)
             "features": features

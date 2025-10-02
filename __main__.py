@@ -76,6 +76,15 @@ Examples:
     parser.add_argument("--split-csv", type=str,
                        help="Path to segment split points CSV (from aria_haptic_align.py)")
 
+    # Task metadata
+    parser.add_argument("--task-name", type=str, default="aria_recording",
+                       help="Task name for the dataset (default: aria_recording)")
+    parser.add_argument("--task-description", type=str,
+                       default="Project Aria multi-modal recording converted to LeRobot format",
+                       help="Task description for the dataset")
+    parser.add_argument("--groot-format", action="store_true",
+                       help="Generate modality.json for NVIDIA GR00T compatibility")
+
     # Logging
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                        default="INFO", help="Logging level")
@@ -204,6 +213,9 @@ def main():
             haptic_csv=args.haptic_csv,
             haptic_time_offset=args.haptic_offset,
             split_csv=args.split_csv,
+            task_name=args.task_name,
+            task_description=args.task_description,
+            create_groot_modality=args.groot_format,
         )
         
         if not args.quiet:

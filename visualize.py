@@ -312,9 +312,15 @@ def create_visualization_video(vrs_path: str,
                               rotate_image: bool = False,
                               haptic_loader = None,
                               start_timestamp_ns: int = 0,
-                              global_start_timestamp_ns: int = None) -> None:
+                              global_start_timestamp_ns: int = None,
+                              session = None) -> None:
     """
     创建可视化视频
+
+    Args:
+        session: Optional pre-initialized AriaSession. If provided, reuses this session
+                instead of creating a new one. This is more efficient when creating
+                multiple visualizations from the same VRS file.
 
     Args:
         vrs_path: VRS文件路径
@@ -336,8 +342,14 @@ def create_visualization_video(vrs_path: str,
     if global_start_timestamp_ns is None:
         global_start_timestamp_ns = start_timestamp_ns
 
-    # 初始化Aria session
-    session = AriaSession.from_paths(vrs_path, mps_dir)
+    # 初始化Aria session (如果没有提供，则创建新的)
+    session_created = False
+    if session is None:
+        session = AriaSession.from_paths(vrs_path, mps_dir)
+        session_created = True
+        logger.info("Created new AriaSession for visualization")
+    else:
+        logger.info("Reusing existing AriaSession for visualization")
     
     # 获取相机流
     camera_label = "camera-rgb"

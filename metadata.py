@@ -21,11 +21,14 @@ from .schema import LeRobotSchema
 logger = logging.getLogger(__name__)
 
 
-def create_tasks_parquet(meta_dir: Path) -> Path:
+def create_tasks_parquet(meta_dir: Path, task_name: str = "aria_recording",
+                        task_description: str = "Project Aria multi-modal recording converted to LeRobot format") -> Path:
     """Create tasks.parquet metadata file (v3.0 format)
 
     Args:
         meta_dir: Path to meta directory
+        task_name: Name of the task (default: "aria_recording")
+        task_description: Description of the task
 
     Returns:
         Path to created tasks.parquet file
@@ -33,17 +36,18 @@ def create_tasks_parquet(meta_dir: Path) -> Path:
     tasks_file = meta_dir / "tasks.parquet"
     task_data = pd.DataFrame([{
         "task_index": 0,
-        "task": "aria_recording",
-        "task_description": "Project Aria multi-modal recording converted to LeRobot format"
+        "task": task_name,
+        "task_description": task_description
     }])
     task_data.to_parquet(tasks_file, index=False)
 
-    logger.info("Created tasks.parquet (v3.0 format)")
+    logger.info(f"Created tasks.parquet (v3.0 format) with task: {task_name}")
     return tasks_file
 
 
 def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episodes: int,
-                           video_keys: List[str] = None, fps: float = 10.0) -> Path:
+                           video_keys: List[str] = None, fps: float = 10.0,
+                           task_name: str = "aria_recording") -> Path:
     """Create episodes parquet files (v3.0 format)
 
     Args:
@@ -75,7 +79,7 @@ def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episo
         episode_data = {
             "episode_index": i,
             "task_index": 0,
-            "task": "aria_recording",
+            "task": task_name,
             "length": frame_count,
             # v3.0 required fields for data files
             "data/chunk_index": 0,  # All in chunk 0 for now
@@ -107,25 +111,93 @@ def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episo
     return episodes_dir
 
 
-def create_stats_json(meta_dir: Path) -> Path:
+def create_stats_json(meta_dir: Path, schema=None, data_dir: Path = None) -> Path:
     """Create stats.json metadata file (v3.0 format)
 
-    Creates empty global stats that will be computed by LeRobot on first load.
+    Computes statistics for all state and action columns required by GR00T.
 
     Args:
         meta_dir: Path to meta directory
+        schema: LeRobot schema (optional, for getting column names)
+        data_dir: Path to data directory (optional, for computing stats)
 
     Returns:
         Path to created stats.json file
     """
     stats_file = meta_dir / "stats.json"
-    # Empty stats - will be computed by LeRobot on first load
-    stats_data = {}
+
+    # If schema and data_dir provided, compute actual statistics
+    if schema is not None and data_dir is not None and data_dir.exists():
+        try:
+            # Find all parquet files
+            parquet_files = sorted(data_dir.glob("chunk-*/episode_*.parquet"))
+
+            if parquet_files:
+                logger.info(f"Computing statistics from {len(parquet_files)} parquet files...")
+
+                # Read first file to get column structure
+                sample_df = pd.read_parquet(parquet_files[0])
+
+                stats_data = {}
+
+                # Compute stats for observation.state
+                if 'observation.state' in sample_df.columns:
+                    state_data = []
+                    for pf in parquet_files:
+                        df = pd.read_parquet(pf)
+                        state_values = np.vstack(df['observation.state'].values)
+                        state_data.append(state_values)
+
+                    all_state = np.vstack(state_data)
+
+                    # Compute mean and std, handling NaN values
+                    stats_data['observation.state'] = {
+                        'mean': convert_numpy_types(np.nanmean(all_state, axis=0)),
+                        'std': convert_numpy_types(np.nanstd(all_state, axis=0)),
+                        'min': convert_numpy_types(np.nanmin(all_state, axis=0)),
+                        'max': convert_numpy_types(np.nanmax(all_state, axis=0)),
+                        'q01': convert_numpy_types(np.nanpercentile(all_state, 1, axis=0)),
+                        'q99': convert_numpy_types(np.nanpercentile(all_state, 99, axis=0)),
+                    }
+
+                # Compute stats for action
+                if 'action' in sample_df.columns:
+                    action_data = []
+                    for pf in parquet_files:
+                        df = pd.read_parquet(pf)
+                        action_values = np.vstack(df['action'].values)
+                        action_data.append(action_values)
+
+                    all_action = np.vstack(action_data)
+
+                    stats_data['action'] = {
+                        'mean': convert_numpy_types(np.mean(all_action, axis=0)),
+                        'std': convert_numpy_types(np.std(all_action, axis=0)),
+                        'min': convert_numpy_types(np.min(all_action, axis=0)),
+                        'max': convert_numpy_types(np.max(all_action, axis=0)),
+                        'q01': convert_numpy_types(np.percentile(all_action, 1, axis=0)),
+                        'q99': convert_numpy_types(np.percentile(all_action, 99, axis=0)),
+                    }
+
+                logger.info(f"Computed statistics for {len(stats_data)} modalities")
+            else:
+                logger.warning("No parquet files found, creating empty stats")
+                stats_data = {}
+        except Exception as e:
+            logger.warning(f"Failed to compute statistics: {e}, creating empty stats")
+            stats_data = {}
+    else:
+        # Empty stats - will be computed by LeRobot on first load
+        stats_data = {}
 
     with open(stats_file, 'w') as f:
         json.dump(stats_data, f, indent=2)
 
-    logger.info("Created stats.json (v3.0 format, stats will be computed by LeRobot)")
+    if stats_data:
+        logger.info("Created stats.json with computed statistics")
+    else:
+        logger.info("Created empty stats.json (stats will be computed by LeRobot)")
+
     return stats_file
 
 
@@ -138,7 +210,10 @@ def update_consolidated_metadata(
     total_frames: int,
     total_parquet: int,
     total_video: int,
-    schema: LeRobotSchema
+    schema: LeRobotSchema,
+    task_name: str = "aria_recording",
+    task_description: str = "Project Aria multi-modal recording converted to LeRobot format",
+    create_groot_modality: bool = False
 ) -> Dict[str, Path]:
     """Update all metadata files after chunk processing completes
 
@@ -182,19 +257,33 @@ def update_consolidated_metadata(
     logger.info(f"Updated info.json with {num_episodes} episodes, {total_frames} total frames")
 
     # Create metadata files (v3.0 format)
-    tasks_file = create_tasks_parquet(meta_dir)
+    tasks_file = create_tasks_parquet(meta_dir, task_name, task_description)
     episodes_dir = create_episodes_parquet(meta_dir, chunk_results, num_episodes,
-                                           video_keys=schema.video_columns, fps=fps)
-    stats_file = create_stats_json(meta_dir)
+                                           video_keys=schema.video_columns, fps=fps, task_name=task_name)
+    stats_file = create_stats_json(meta_dir, schema=schema, data_dir=out_dir / "data")
 
-    logger.info("Consolidated metadata update complete (v3.0 format)")
-
-    return {
+    # Create GR00T modality.json if requested
+    result = {
         "info.json": info_file,
         "tasks.parquet": tasks_file,
         "episodes": episodes_dir,
         "stats.json": stats_file,
     }
+
+    if create_groot_modality:
+        modality_file = create_modality_json(meta_dir, schema)
+        result["modality.json"] = modality_file
+
+        # Also create JSONL files for GR00T
+        tasks_jsonl, episodes_jsonl = create_groot_jsonl_metadata(meta_dir)
+        result["tasks.jsonl"] = tasks_jsonl
+        result["episodes.jsonl"] = episodes_jsonl
+
+        logger.info("Consolidated metadata update complete (v3.0 format + full GR00T compatibility)")
+    else:
+        logger.info("Consolidated metadata update complete (v3.0 format)")
+
+    return result
 
 
 def write_single_episode_metadata(
@@ -205,7 +294,10 @@ def write_single_episode_metadata(
     parquet_metadata: Dict[str, Any],
     video_metadata: List[Dict[str, Any]],
     episode_id: int,
-    total_frames: int
+    total_frames: int,
+    task_name: str = "aria_recording",
+    task_description: str = "Project Aria multi-modal recording converted to LeRobot format",
+    create_groot_modality: bool = False
 ) -> List[str]:
     """Write metadata files for single episode (non-chunked) mode
 
@@ -248,7 +340,7 @@ def write_single_episode_metadata(
     written_files.append(str(info_file))
 
     # Create tasks.parquet (v3.0)
-    tasks_file = create_tasks_parquet(structure["meta"])
+    tasks_file = create_tasks_parquet(structure["meta"], task_name, task_description)
     written_files.append(str(tasks_file))
 
     # Create episodes parquet (v3.0)
@@ -260,14 +352,27 @@ def write_single_episode_metadata(
         }
     }]
     video_keys = schema.video_columns  # Already a list
-    episodes_dir = create_episodes_parquet(structure["meta"], chunk_results, 1, video_keys, fps=fps)
+    episodes_dir = create_episodes_parquet(structure["meta"], chunk_results, 1, video_keys, fps=fps, task_name=task_name)
     written_files.append(str(episodes_dir))
 
     # Create stats.json (v3.0)
-    stats_file = create_stats_json(structure["meta"])
+    stats_file = create_stats_json(structure["meta"], schema=schema, data_dir=structure["data"])
     written_files.append(str(stats_file))
 
-    logger.info(f"Written metadata files: {written_files}")
+    # Create GR00T compatibility files if requested
+    if create_groot_modality:
+        modality_file = create_modality_json(structure["meta"], schema)
+        written_files.append(str(modality_file))
+
+        # Also create JSONL files for GR00T
+        tasks_jsonl, episodes_jsonl = create_groot_jsonl_metadata(structure["meta"])
+        written_files.append(str(tasks_jsonl))
+        written_files.append(str(episodes_jsonl))
+
+        logger.info(f"Written metadata files (including full GR00T compatibility): {written_files}")
+    else:
+        logger.info(f"Written metadata files: {written_files}")
+
     return written_files
 
 
@@ -284,3 +389,158 @@ def convert_numpy_types(obj):
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
     return obj
+
+
+def create_modality_json(meta_dir: Path, schema: LeRobotSchema) -> Path:
+    """Create modality.json metadata file for NVIDIA GR00T compatibility
+
+    This file provides detailed metadata about state and action modalities,
+    enabling GR00T to interpret concatenated float32 arrays as distinct fields.
+
+    Args:
+        meta_dir: Path to meta directory
+        schema: LeRobot schema containing column definitions
+
+    Returns:
+        Path to created modality.json file
+    """
+    modality_file = meta_dir / "modality.json"
+
+    # Analyze observation.state structure (79 elements)
+    # Based on Aria data: [hand_landmarks (63), gaze (2), device_pose (14)]
+    # Total: 63 + 2 + 14 = 79 elements
+    # Note: hand_landmarks may be NaN when hands are not detected
+
+    state_modalities = {
+        "hand_landmarks": {
+            "original_key": "observation.state",
+            "start": 0,
+            "end": 63,
+            "description": "Hand landmarks in world coordinates (21 joints * 3 coords). May contain NaN when hands not detected."
+        },
+        "gaze": {
+            "original_key": "observation.state",
+            "start": 63,
+            "end": 65,
+            "description": "Eye gaze projection in normalized UV coordinates [0-1] on RGB camera image plane"
+        },
+        "device_pose": {
+            "original_key": "observation.state",
+            "start": 65,
+            "end": 79,
+            "description": "Device pose: 4x4 transformation matrix (world_T_device) flattened, last 14 elements [rotation(9) + translation(3) + bottom_row(2)]"
+        }
+    }
+
+    # Analyze action structure (8 elements)
+    # Based on tactile sensor CSV: Ring Tip + Little Tip forces
+    # Format: [ring_fx, ring_fy, ring_fz, ring_mag, little_fx, little_fy, little_fz, little_mag]
+    action_modalities = {
+        "ring_tip_force_xyz": {
+            "original_key": "action",
+            "start": 0,
+            "end": 3,
+            "description": "Ring finger tip tactile force vector (fx, fy, fz) from sensor"
+        },
+        "ring_tip_force_magnitude": {
+            "original_key": "action",
+            "start": 3,
+            "end": 4,
+            "description": "Ring finger tip tactile force magnitude"
+        },
+        "little_tip_force_xyz": {
+            "original_key": "action",
+            "start": 4,
+            "end": 7,
+            "description": "Little finger tip tactile force vector (fx, fy, fz) from sensor"
+        },
+        "little_tip_force_magnitude": {
+            "original_key": "action",
+            "start": 7,
+            "end": 8,
+            "description": "Little finger tip tactile force magnitude"
+        }
+    }
+
+    # Video key mapping (standardize camera names)
+    video_modalities = {}
+    for vid_col in schema.video_columns:
+        # Extract camera name from column (e.g., "observation.images.main" -> "main")
+        camera_name = vid_col.split('.')[-1]
+        video_modalities[camera_name] = {
+            "original_key": vid_col
+        }
+
+    # Annotation mapping (map task_index to human-readable task description)
+    annotation_modalities = {
+        "human.task_description": {
+            "original_key": "task_index",
+            "description": "Task description annotation from tasks.parquet"
+        }
+    }
+
+    modality_data = {
+        "state": state_modalities,
+        "action": action_modalities,
+        "video": video_modalities,
+        "annotation": annotation_modalities
+    }
+
+    with open(modality_file, 'w') as f:
+        json.dump(modality_data, f, indent=2)
+
+    logger.info(f"Created modality.json for GR00T compatibility")
+    return modality_file
+
+
+def create_groot_jsonl_metadata(meta_dir: Path) -> tuple[Path, Path]:
+    """Create JSONL metadata files required by NVIDIA Isaac GR00T
+
+    GR00T requires tasks.jsonl and episodes.jsonl instead of Parquet format.
+    This function converts the Parquet files to JSONL for GR00T compatibility.
+
+    Args:
+        meta_dir: Path to meta directory
+
+    Returns:
+        Tuple of (tasks_jsonl_path, episodes_jsonl_path)
+    """
+    import json
+
+    # Convert tasks.parquet to tasks.jsonl
+    tasks_parquet = meta_dir / "tasks.parquet"
+    tasks_jsonl = meta_dir / "tasks.jsonl"
+
+    if tasks_parquet.exists():
+        tasks_df = pd.read_parquet(tasks_parquet)
+        with open(tasks_jsonl, 'w') as f:
+            for _, row in tasks_df.iterrows():
+                task_entry = {
+                    "task_index": int(row["task_index"]),
+                    "task": row["task"]
+                }
+                f.write(json.dumps(task_entry) + '\n')
+        logger.info(f"Created tasks.jsonl with {len(tasks_df)} tasks for GR00T")
+
+    # Convert episodes/ parquet to episodes.jsonl
+    episodes_dir = meta_dir / "episodes"
+    episodes_jsonl = meta_dir / "episodes.jsonl"
+
+    if episodes_dir.exists():
+        # Find all episode parquet files
+        episode_files = sorted(episodes_dir.glob("chunk-*/file-*.parquet"))
+        if episode_files:
+            episode_dfs = [pd.read_parquet(f) for f in episode_files]
+            episodes_df = pd.concat(episode_dfs, ignore_index=True)
+
+            with open(episodes_jsonl, 'w') as f:
+                for _, row in episodes_df.iterrows():
+                    episode_entry = {
+                        "episode_index": int(row["episode_index"]),
+                        "tasks": [row["task"]],  # GR00T expects a list of tasks
+                        "length": int(row["length"])
+                    }
+                    f.write(json.dumps(episode_entry) + '\n')
+            logger.info(f"Created episodes.jsonl with {len(episodes_df)} episodes for GR00T")
+
+    return tasks_jsonl, episodes_jsonl

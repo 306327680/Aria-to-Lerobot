@@ -187,7 +187,10 @@ def convert(vrs_path: str,
            split_csv: Optional[str] = None,
            time_range_ns: Optional[tuple] = None,
            chunk_id: Optional[int] = None,
-           global_index_offset: int = 0) -> Dict[str, Any]:
+           global_index_offset: int = 0,
+           task_name: str = "aria_recording",
+           task_description: str = "Project Aria multi-modal recording converted to LeRobot format",
+           create_groot_modality: bool = False) -> Dict[str, Any]:
     """
     Convert Aria VRS/MPS data to LeRobot dataset format
 
@@ -347,7 +350,7 @@ def convert(vrs_path: str,
             update_consolidated_metadata(
                 out_dir, chunk_results, session_info, fps,
                 len(chunk_results), total_frames, total_parquet, total_video,
-                schema
+                schema, task_name, task_description, create_groot_modality
             )
 
             return {
@@ -459,7 +462,7 @@ def convert(vrs_path: str,
         metadata_files = write_single_episode_metadata(
             structure, schema, session_info, fps,
             parquet_metadata, video_metadata, episode_id,
-            processed_data["valid_frames"]
+            processed_data["valid_frames"], task_name, task_description, create_groot_modality
         )
         
         # Final validation

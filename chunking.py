@@ -200,7 +200,8 @@ def process_all_chunks_single_pass(
                     rotate_image=rotate_visualization,
                     haptic_loader=haptic_loader,
                     start_timestamp_ns=start_ts_ns,
-                    global_start_timestamp_ns=start_timestamp_ns  # Use global start for haptic data alignment
+                    global_start_timestamp_ns=start_timestamp_ns,  # Use global start for haptic data alignment
+                    session=session  # 🔥 Reuse the same session for all episodes!
                 )
                 logger.info(f"Visualization for episode {chunk_idx} created: {viz_output_path}")
             except Exception as e:
