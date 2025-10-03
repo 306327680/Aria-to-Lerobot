@@ -129,9 +129,9 @@ class LeRobotSchema:
             "chunks_size": 1000,
             "fps": fps,
 
-            # Data paths (use GR00T-compatible variable names)
-            "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-            "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+            # Data paths (use LeRobot-compatible variable names for visualization)
+            "data_path": "data/chunk-{chunk_index:03d}/episode_{file_index:06d}.parquet",
+            "video_path": "videos/chunk-{chunk_index:03d}/{video_key}/episode_{file_index:06d}.mp4",
 
             # v2.1 features schema (compatible with visualize_dataset)
             "features": features
@@ -255,34 +255,31 @@ LEROBOT_V21_SCHEMA = LeRobotSchema(
 )
 
 
-def flatten_hand_landmarks(left_landmarks: Optional[np.ndarray], 
+def flatten_hand_landmarks(left_landmarks: Optional[np.ndarray],
                           right_landmarks: Optional[np.ndarray]) -> Tuple[np.ndarray, bool, bool]:
     """
     Flatten hand landmarks for storage
-    
+
     Args:
         left_landmarks: Left hand landmarks (21, 3) or None
         right_landmarks: Right hand landmarks (21, 3) or None
-    
+
     Returns:
         (flattened_landmarks, valid_left, valid_right)
-        flattened_landmarks: (63,) array with left hand landmarks (21×3 flattened)
+        flattened_landmarks: (63,) array with RIGHT hand landmarks (21×3 flattened)
     """
     flattened = np.full(63, np.nan, dtype=np.float32)
     valid_left = False
     valid_right = False
-    
+
     if left_landmarks is not None and left_landmarks.shape == (21, 3):
-        flattened[:63] = left_landmarks.flatten()
         valid_left = not np.any(np.isnan(left_landmarks))
-    
-    # Note: Only storing left hand landmarks in the 63-element array
-    # Right hand would need separate column or extended array
+
+    # Store RIGHT hand landmarks in the 63-element array
     if right_landmarks is not None and right_landmarks.shape == (21, 3):
+        flattened[:63] = right_landmarks.flatten()
         valid_right = not np.any(np.isnan(right_landmarks))
-        # For now, right hand landmarks are tracked via valid flag only
-        # Could extend to 126-element array if needed
-    
+
     return flattened, valid_left, valid_right
 
 
