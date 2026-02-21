@@ -119,24 +119,48 @@ class HapticVisualizer:
         force1_norm = np.clip(force1 / self.max_force, 0, 1)
         force2_norm = np.clip(force2 / self.max_force, 0, 1)
 
-        # 绘制第一个力度条
+        # 绘制第一个力度条（颜色根据力度动态变化）
         self._draw_single_bar(
             image, bar_x1, bar_y, bar_width, bar_height,
-            force1_norm, force1, self.sensor1_name, (0, 165, 255)  # 橙色
+            force1_norm, force1, self.sensor1_name
         )
 
-        # 绘制第二个力度条
+        # 绘制第二个力度条（颜色根据力度动态变化）
         self._draw_single_bar(
             image, bar_x2, bar_y, bar_width, bar_height,
-            force2_norm, force2, self.sensor2_name, (0, 255, 0)  # 绿色
+            force2_norm, force2, self.sensor2_name
         )
 
         return image
 
+    def _get_force_color(self, value_norm: float) -> Tuple[int, int, int]:
+        """
+        根据力度值获取线性渐变颜色 (BGR格式)
+        
+        线性渐变: 低力度(绿色) -> 高力度(红色)
+        
+        Args:
+            value_norm: 归一化的力度值 (0.0 ~ 1.0)
+            
+        Returns:
+            BGR颜色元组
+        """
+        value_norm = np.clip(value_norm, 0, 1)
+        
+        # 线性渐变: 绿色 -> 红色
+        r = int(255 * value_norm)        # 0 -> 255
+        g = int(255 * (1 - value_norm))  # 255 -> 0
+        b = 0
+        
+        return (b, g, r)
+
     def _draw_single_bar(self, image: np.ndarray, x: int, y: int,
                         width: int, height: int, value_norm: float,
-                        value_raw: float, label: str, color: Tuple[int, int, int]):
-        """绘制单个力度指示条"""
+                        value_raw: float, label: str, base_color: Tuple[int, int, int] = None):
+        """绘制单个力度指示条（颜色根据力度动态变化）"""
+
+        # 获取根据力度变化的颜色
+        color = self._get_force_color(value_norm)
 
         # 背景框
         cv2.rectangle(image, (x, y), (x + width, y + height), (50, 50, 50), -1)
@@ -170,13 +194,16 @@ class HapticVisualizer:
                       (x + 2, y + height + 15 + i * 12),
                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
-        # 当前数值
+        # 当前数值（颜色与力度条一致）
         value_text = f"{value_raw:.1f}"
         (text_w, text_h), _ = cv2.getTextSize(value_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
         text_x = x + (width - text_w) // 2
         text_y = y - 8
+        # 添加黑色描边使文字更清晰
         cv2.putText(image, value_text, (text_x, text_y),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)  # 黑色描边
+        cv2.putText(image, value_text, (text_x, text_y),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)  # 力度对应的颜色
 
 
 def create_visualization_with_haptics(

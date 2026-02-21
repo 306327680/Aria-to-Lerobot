@@ -313,7 +313,8 @@ def create_visualization_video(vrs_path: str,
                               haptic_loader = None,
                               start_timestamp_ns: int = 0,
                               global_start_timestamp_ns: int = None,
-                              session = None) -> None:
+                              session = None,
+                              max_force: float = 150.0) -> None:
     """
     创建可视化视频
 
@@ -332,6 +333,7 @@ def create_visualization_video(vrs_path: str,
         haptic_loader: 触觉数据加载器（可选）
         start_timestamp_ns: 起始时间戳（纳秒），用于定位VRS中的起始帧
         global_start_timestamp_ns: 全局起始时间戳（纳秒），用于计算触觉数据的相对时间。如果为None，则使用start_timestamp_ns
+        max_force: 最大力度值（用于归一化显示），默认150.0
     """
     logger.info(f"创建可视化视频...")
     logger.info(f"VRS文件: {vrs_path}")
@@ -528,7 +530,7 @@ def create_visualization_video(vrs_path: str,
                 time_s = (timestamp_ns - global_start_timestamp_ns) / 1e9
                 # get_force_at_time returns ((mag1, xyz1), (mag2, xyz2))
                 (force_left, _), (force_right, _) = haptic_loader.get_force_at_time(time_s)
-                image_bgr = draw_force_bars(image_bgr, force_left, force_right)
+                image_bgr = draw_force_bars(image_bgr, force_left, force_right, max_force)
             
             # 写入视频帧
             writer.write(image_bgr)
@@ -560,6 +562,8 @@ def main():
     parser.add_argument("--stride", type=int, default=1, help="帧间隔 (默认: 1)")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细输出")
     parser.add_argument("--rotate", action="store_true", help="顺时针旋转图像90度")
+    parser.add_argument("--max-force", type=float, default=150.0,
+                       help="力度显示的最大值，用于归一化 (默认: 150.0)")
     
     args = parser.parse_args()
     
@@ -599,7 +603,8 @@ def main():
             str(output_path),
             max_frames=args.max_frames,
             stride=args.stride,
-            rotate_image=args.rotate
+            rotate_image=args.rotate,
+            max_force=args.max_force
         )
         return 0
     except Exception as e:
