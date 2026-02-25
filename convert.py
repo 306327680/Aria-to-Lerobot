@@ -66,49 +66,66 @@ class HapticDataLoader:
         # Extract timestamps (use relative_time column)
         if 'relative_time' in df.columns:
             self.timestamps = df['relative_time'].values
+        elif 'Relative_Time_ms' in df.columns:
+            self.timestamps = df['Relative_Time_ms'].values / 1000.0
+        elif 'relative_time_ms' in df.columns:
+            self.timestamps = df['relative_time_ms'].values / 1000.0
         elif 'timestamp' in df.columns:
             timestamps = df['timestamp'].values
             # Convert to relative time if absolute timestamp
             if timestamps[0] > 1e9:
                 timestamps = timestamps / 1e9
             self.timestamps = timestamps - timestamps[0]
+        elif 'Timestamp' in df.columns:
+            timestamps = df['Timestamp'].values
+            if timestamps[0] > 1e9:
+                timestamps = timestamps / 1e9
+            self.timestamps = timestamps - timestamps[0]
         else:
-            raise ValueError("CSV file must have 'relative_time' or 'timestamp' column")
+            raise ValueError("CSV file must have 'relative_time', 'Relative_Time_ms', or 'timestamp' column")
 
         # Extract force data (magnitude + xyz components)
         magnitude_cols = [col for col in df.columns if 'magnitude' in col.lower()]
 
+        # Also support _Total columns (e.g. ThumbTip_Total, IndexTip_Total)
+        if len(magnitude_cols) < 2:
+            total_cols = [col for col in df.columns if col.endswith('_Total')]
+            if len(total_cols) >= 2:
+                magnitude_cols = total_cols
+
         if len(magnitude_cols) >= 2:
             # Assume first two magnitude columns are the two sensors
-            self.sensor1_name = magnitude_cols[0].replace('_magnitude', '')
-            self.sensor2_name = magnitude_cols[1].replace('_magnitude', '')
+            self.sensor1_name = magnitude_cols[0].replace('_magnitude', '').replace('_Total', '')
+            self.sensor2_name = magnitude_cols[1].replace('_magnitude', '').replace('_Total', '')
 
             # Extract magnitude
             self.force1_magnitude = df[magnitude_cols[0]].values
             self.force2_magnitude = df[magnitude_cols[1]].values
 
             # Extract xyz components if available
-            fx1_col = f"{self.sensor1_name}_fx"
-            fy1_col = f"{self.sensor1_name}_fy"
-            fz1_col = f"{self.sensor1_name}_fz"
-            fx2_col = f"{self.sensor2_name}_fx"
-            fy2_col = f"{self.sensor2_name}_fy"
-            fz2_col = f"{self.sensor2_name}_fz"
+            # Support both lowercase (sensor_fx) and capitalized (Sensor_Fx) naming
+            col_map = {col.lower(): col for col in df.columns}
+            fx1_col = col_map.get(f"{self.sensor1_name}_fx".lower())
+            fy1_col = col_map.get(f"{self.sensor1_name}_fy".lower())
+            fz1_col = col_map.get(f"{self.sensor1_name}_fz".lower())
+            fx2_col = col_map.get(f"{self.sensor2_name}_fx".lower())
+            fy2_col = col_map.get(f"{self.sensor2_name}_fy".lower())
+            fz2_col = col_map.get(f"{self.sensor2_name}_fz".lower())
 
-            if all(col in df.columns for col in [fx1_col, fy1_col, fz1_col]):
+            if all(c is not None for c in [fx1_col, fy1_col, fz1_col]):
                 self.force1_xyz = np.stack([df[fx1_col].values, df[fy1_col].values, df[fz1_col].values], axis=1)
             else:
                 # Fallback: put magnitude in x, zero in y/z
                 self.force1_xyz = np.column_stack([self.force1_magnitude, np.zeros_like(self.force1_magnitude), np.zeros_like(self.force1_magnitude)])
 
-            if all(col in df.columns for col in [fx2_col, fy2_col, fz2_col]):
+            if all(c is not None for c in [fx2_col, fy2_col, fz2_col]):
                 self.force2_xyz = np.stack([df[fx2_col].values, df[fy2_col].values, df[fz2_col].values], axis=1)
             else:
                 # Fallback: put magnitude in x, zero in y/z
                 self.force2_xyz = np.column_stack([self.force2_magnitude, np.zeros_like(self.force2_magnitude), np.zeros_like(self.force2_magnitude)])
 
         elif len(magnitude_cols) == 1:
-            self.sensor1_name = magnitude_cols[0].replace('_magnitude', '')
+            self.sensor1_name = magnitude_cols[0].replace('_magnitude', '').replace('_Total', '')
             self.sensor2_name = "sensor2"
             self.force1_magnitude = df[magnitude_cols[0]].values
             self.force2_magnitude = np.zeros_like(self.force1_magnitude)
@@ -184,7 +201,9 @@ def convert(vrs_path: str,
            rotate_visualization: bool = False,
            haptic_csv: Optional[str] = None,
            haptic_time_offset: float = 0.0,
+           segment_time_offset: float = 0.0,
            split_csv: Optional[str] = None,
+           segments_csv: Optional[str] = None,
            time_range_ns: Optional[tuple] = None,
            chunk_id: Optional[int] = None,
            global_index_offset: int = 0,
@@ -210,7 +229,10 @@ def convert(vrs_path: str,
         rotate_visualization: Rotate visualization video 90 degrees clockwise
         haptic_csv: Path to haptic sensor CSV file
         haptic_time_offset: Time offset (seconds) to align haptic data with Aria data
+        segment_time_offset: Time offset (seconds) added to segment boundaries to convert from
+            alignment tool time base (hand tracking start) to VRS camera time base
         split_csv: Path to segment split points CSV (from aria_haptic_align.py)
+        segments_csv: Path to force segments CSV with start/end pairs (from alignment tool)
         time_range_ns: Optional (start_ns, end_ns) tuple to filter frames by timestamp
         chunk_id: Optional chunk ID for output naming
 
@@ -373,7 +395,110 @@ def convert(vrs_path: str,
                 }
             }
 
-        # Initialize Aria session (if not already done in split_csv mode)
+        # Handle segments CSV (force segment pairs from alignment tool)
+        if segments_csv is not None:
+            from .chunking import load_segment_pairs, create_segment_boundaries
+
+            # Initialize temporary session for FPS estimation
+            temp_session = AriaSession.from_paths(vrs_path, mps_dir)
+            session_info = temp_session.get_session_info()
+
+            if fps is None:
+                fps = _estimate_fps(temp_session)
+                fps = fps / stride
+                logger.info(f"Auto-detected FPS: {fps:.2f} (adjusted for stride={stride})")
+
+            # Load enabled segment pairs
+            logger.info(f"Loading segment pairs from {segments_csv}")
+            segment_pairs = load_segment_pairs(segments_csv)
+            if not segment_pairs:
+                raise ValueError(f"No enabled segments found in {segments_csv}")
+            logger.info(f"Loaded {len(segment_pairs)} enabled segments")
+
+            # Apply segment time offset (convert from alignment tool time base to VRS camera time base)
+            if segment_time_offset != 0.0:
+                logger.info(f"Applying segment time offset: +{segment_time_offset:.3f}s")
+                segment_pairs = [(start + segment_time_offset, end + segment_time_offset)
+                                 for start, end in segment_pairs]
+
+            # Get start timestamp
+            first_frame = next(iter(_create_camera_frame_iterator(temp_session, 1, 1)))
+            start_timestamp_ns = first_frame[0]
+
+            # Create interleaved boundaries with active/inactive chunk mapping
+            chunk_boundaries_ns, active_indices, episode_id_map = \
+                create_segment_boundaries(segment_pairs, start_timestamp_ns)
+
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing {len(segment_pairs)} segments as episodes (single pass)")
+            for i, (start_s, end_s) in enumerate(segment_pairs):
+                logger.info(f"  Episode {i}: {start_s:.3f}s - {end_s:.3f}s ({end_s - start_s:.3f}s)")
+            logger.info(f"Output directory: {out_dir}")
+            logger.info(f"{'='*60}\n")
+
+            # Initialize Aria session
+            session = AriaSession.from_paths(vrs_path, mps_dir)
+            session_info = session.get_session_info()
+
+            # Initialize haptic data loader
+            haptic_loader = None
+            if haptic_csv is not None:
+                logger.info(f"Loading haptic data from {haptic_csv} with offset {haptic_time_offset}s")
+                haptic_loader = HapticDataLoader(haptic_csv, haptic_time_offset)
+
+            # Process all chunks in single pass (gaps automatically skipped)
+            chunk_results = process_all_chunks_single_pass(
+                session=session,
+                chunk_boundaries_ns=chunk_boundaries_ns,
+                start_timestamp_ns=start_timestamp_ns,
+                structure=structure,
+                schema=schema,
+                max_slop_ns=max_slop_ns,
+                fps=fps,
+                stride=stride,
+                max_frames=max_frames,
+                haptic_loader=haptic_loader,
+                legacy_v21=legacy_v21,
+                create_camera_frame_iterator=_create_camera_frame_iterator,
+                encode_videos_func=_encode_videos,
+                create_visualization=create_visualization,
+                rotate_visualization=rotate_visualization,
+                vrs_path=str(vrs_path),
+                mps_dir=str(mps_dir),
+                active_chunk_indices=active_indices,
+                episode_id_map=episode_id_map
+            )
+
+            # Summary
+            total_frames = sum(r.get('result', {}).get('processing', {}).get('valid_frames', 0) for r in chunk_results)
+            total_time = sum(r.get('result', {}).get('processing', {}).get('elapsed_time_s', 0) for r in chunk_results)
+            total_parquet = sum(r.get('result', {}).get('files', {}).get('parquet_shards', 0) for r in chunk_results)
+            total_video = sum(r.get('result', {}).get('files', {}).get('video_shards', 0) for r in chunk_results)
+
+            logger.info("Updating consolidated metadata...")
+            update_consolidated_metadata(
+                out_dir, chunk_results, session_info, fps,
+                len(chunk_results), total_frames, total_parquet, total_video,
+                schema, task_name, task_description, create_groot_modality
+            )
+
+            return {
+                'success': True,
+                'mode': 'segments',
+                'num_chunks': len(chunk_results),
+                'chunks': chunk_results,
+                'processing': {
+                    'total_frames': total_frames,
+                    'valid_frames': total_frames,
+                    'elapsed_time_s': total_time,
+                },
+                'files': {
+                    'parquet_shards': total_parquet,
+                    'video_shards': total_video,
+                },
+            }
+
+        # Initialize Aria session (if not already done in split_csv/segments_csv mode)
         logger.info("Initializing Aria session...")
         session = AriaSession.from_paths(vrs_path, mps_dir)
 
