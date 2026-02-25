@@ -12,9 +12,11 @@ import logging
 import sys
 import time
 import json
+from functools import partial
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, Iterator
 import numpy as np
+import cv2
 from dataclasses import asdict
 
 # Add aria_api to path
@@ -199,6 +201,7 @@ def convert(vrs_path: str,
            log_level: str = "INFO",
            create_visualization: bool = False,
            rotate_visualization: bool = False,
+           rotate_image: bool = False,
            haptic_csv: Optional[str] = None,
            haptic_time_offset: float = 0.0,
            segment_time_offset: float = 0.0,
@@ -227,6 +230,7 @@ def convert(vrs_path: str,
         log_level: Logging level
         create_visualization: Create visualization video with hand landmarks and gaze projections
         rotate_visualization: Rotate visualization video 90 degrees clockwise
+        rotate_image: Rotate dataset RGB frames 90 degrees clockwise
         haptic_csv: Path to haptic sensor CSV file
         haptic_time_offset: Time offset (seconds) to align haptic data with Aria data
         segment_time_offset: Time offset (seconds) added to segment boundaries to convert from
@@ -353,7 +357,7 @@ def convert(vrs_path: str,
                 max_frames=max_frames,
                 haptic_loader=haptic_loader,
                 legacy_v21=legacy_v21,
-                create_camera_frame_iterator=_create_camera_frame_iterator,
+                create_camera_frame_iterator=partial(_create_camera_frame_iterator, rotate_cw90=rotate_image),
                 encode_videos_func=_encode_videos,
                 create_visualization=create_visualization,
                 rotate_visualization=rotate_visualization,
@@ -459,7 +463,7 @@ def convert(vrs_path: str,
                 max_frames=max_frames,
                 haptic_loader=haptic_loader,
                 legacy_v21=legacy_v21,
-                create_camera_frame_iterator=_create_camera_frame_iterator,
+                create_camera_frame_iterator=partial(_create_camera_frame_iterator, rotate_cw90=rotate_image),
                 encode_videos_func=_encode_videos,
                 create_visualization=create_visualization,
                 rotate_visualization=rotate_visualization,
@@ -507,7 +511,7 @@ def convert(vrs_path: str,
 
         # Get camera frame iterator
         logger.info("Setting up camera frame iteration...")
-        frame_iterator = _create_camera_frame_iterator(session, stride, max_frames)
+        frame_iterator = _create_camera_frame_iterator(session, stride, max_frames, rotate_cw90=rotate_image)
 
         # Estimate total frames and FPS
         total_frames = _estimate_total_frames(session, stride, max_frames)
@@ -542,7 +546,7 @@ def convert(vrs_path: str,
             start_timestamp_ns = first_frame[0]
             logger.info(f"Start timestamp: {start_timestamp_ns} ns")
             # Recreate iterator for actual processing
-            frame_iterator = _create_camera_frame_iterator(session, stride, max_frames)
+            frame_iterator = _create_camera_frame_iterator(session, stride, max_frames, rotate_cw90=rotate_image)
         except StopIteration:
             logger.warning("No frames found in stream")
 
@@ -666,9 +670,10 @@ def convert(vrs_path: str,
         raise
 
 
-def _create_camera_frame_iterator(session: AriaSession, 
+def _create_camera_frame_iterator(session: AriaSession,
                                  stride: int = 1,
-                                 max_frames: Optional[int] = None) -> Iterator[Tuple[int, np.ndarray]]:
+                                 max_frames: Optional[int] = None,
+                                 rotate_cw90: bool = False) -> Iterator[Tuple[int, np.ndarray]]:
     """Create iterator over camera-rgb frames"""
     
     if not hasattr(session, 'vrs_data_provider') or session.vrs_data_provider is None:
@@ -765,7 +770,11 @@ def _create_camera_frame_iterator(session: AriaSession,
             
             # Ensure RGB format
             image_array = ensure_rgb_format(image_array, "rgb")  # VRS provides RGB format
-            
+
+            # Rotate 90 degrees clockwise if requested
+            if rotate_cw90:
+                image_array = cv2.rotate(image_array, cv2.ROTATE_90_CLOCKWISE)
+
             yield timestamp_ns, image_array
             processed_count += 1
             
