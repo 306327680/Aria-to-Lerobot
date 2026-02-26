@@ -75,6 +75,8 @@ Examples:
     # Segment splitting
     parser.add_argument("--split-csv", type=str,
                        help="Path to segment split points CSV (from aria_haptic_align.py)")
+    parser.add_argument("--segments-csv", type=str,
+                       help="Path to force segments CSV with start/end pairs (from alignment tool, replaces --split-csv)")
 
     # Task metadata
     parser.add_argument("--task-name", type=str, default="aria_recording",
@@ -213,6 +215,7 @@ def main():
             haptic_csv=args.haptic_csv,
             haptic_time_offset=args.haptic_offset,
             split_csv=args.split_csv,
+            segments_csv=args.segments_csv,
             task_name=args.task_name,
             task_description=args.task_description,
             create_groot_modality=args.groot_format,
@@ -221,8 +224,9 @@ def main():
         if not args.quiet:
             print("\n✅ Conversion completed successfully!")
 
-            if result.get('mode') == 'chunked':
-                print(f"🔪 Split into {result['num_chunks']} chunks (episodes)")
+            if result.get('mode') in ('chunked', 'segments'):
+                mode_label = 'segments' if result.get('mode') == 'segments' else 'chunks'
+                print(f"🔪 Split into {result['num_chunks']} {mode_label} (episodes)")
                 print(f"📊 Processed: {result['processing']['valid_frames']:,} total frames")
                 print(f"⏱️  Time: {result['processing']['elapsed_time_s']:.1f}s")
                 print(f"📂 Output directory: {args.output_dir}")

@@ -47,7 +47,8 @@ def create_tasks_parquet(meta_dir: Path, task_name: str = "aria_recording",
 
 def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episodes: int,
                            video_keys: List[str] = None, fps: float = 10.0,
-                           task_name: str = "aria_recording") -> Path:
+                           task_name: str = "aria_recording",
+                           path_format: str = "groot") -> Path:
     """Create episodes parquet files (v3.0 format)
 
     Args:
@@ -76,14 +77,18 @@ def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episo
         # Calculate episode duration in seconds
         episode_duration_s = float(frame_count) / fps if frame_count > 0 else 0.0
 
+        # Field names depend on path_format
+        chunk_key = "episode_chunk" if path_format == "groot" else "chunk_index"
+        index_key = "episode_index" if path_format == "groot" else "file_index"
+
         episode_data = {
             "episode_index": i,
             "task_index": 0,
             "task": task_name,
             "length": frame_count,
             # v3.0 required fields for data files
-            "data/chunk_index": 0,  # All in chunk 0 for now
-            "data/file_index": i,   # One file per episode
+            f"data/{chunk_key}": 0,  # All in chunk 0 for now
+            f"data/{index_key}": i,  # One file per episode
             "dataset_from_index": cumulative_frames,
             "dataset_to_index": cumulative_frames + frame_count,
         }
@@ -92,8 +97,8 @@ def create_episodes_parquet(meta_dir: Path, chunk_results: List[Dict], num_episo
         # Timestamps represent position in the concatenated video file (in seconds)
         # For single-episode files: from=0.0, to=episode_duration
         for vid_key in video_keys:
-            episode_data[f"videos/{vid_key}/chunk_index"] = 0
-            episode_data[f"videos/{vid_key}/file_index"] = i
+            episode_data[f"videos/{vid_key}/{chunk_key}"] = 0
+            episode_data[f"videos/{vid_key}/{index_key}"] = i
             episode_data[f"videos/{vid_key}/from_timestamp"] = 0.0  # Start of this video file
             episode_data[f"videos/{vid_key}/to_timestamp"] = episode_duration_s  # End of this video file
 
@@ -213,7 +218,8 @@ def update_consolidated_metadata(
     schema: LeRobotSchema,
     task_name: str = "aria_recording",
     task_description: str = "Project Aria multi-modal recording converted to LeRobot format",
-    create_groot_modality: bool = False
+    create_groot_modality: bool = False,
+    path_format: str = "groot"
 ) -> Dict[str, Path]:
     """Update all metadata files after chunk processing completes
 
@@ -249,6 +255,7 @@ def update_consolidated_metadata(
         conversion_time=time.time(),
         video_shards=total_video,
         parquet_shards=total_parquet,
+        path_format=path_format,
     )
 
     info_file = meta_dir / "info.json"
@@ -259,7 +266,8 @@ def update_consolidated_metadata(
     # Create metadata files (v3.0 format)
     tasks_file = create_tasks_parquet(meta_dir, task_name, task_description)
     episodes_dir = create_episodes_parquet(meta_dir, chunk_results, num_episodes,
-                                           video_keys=schema.video_columns, fps=fps, task_name=task_name)
+                                           video_keys=schema.video_columns, fps=fps, task_name=task_name,
+                                           path_format=path_format)
     stats_file = create_stats_json(meta_dir, schema=schema, data_dir=out_dir / "data")
 
     # Create GR00T modality.json if requested
@@ -297,7 +305,8 @@ def write_single_episode_metadata(
     total_frames: int,
     task_name: str = "aria_recording",
     task_description: str = "Project Aria multi-modal recording converted to LeRobot format",
-    create_groot_modality: bool = False
+    create_groot_modality: bool = False,
+    path_format: str = "groot"
 ) -> List[str]:
     """Write metadata files for single episode (non-chunked) mode
 
@@ -332,6 +341,7 @@ def write_single_episode_metadata(
         conversion_time=time.time(),
         video_shards=len(video_metadata),
         parquet_shards=len(parquet_metadata.get("shards", [])),
+        path_format=path_format,
     )
 
     info_file = structure["meta"] / "info.json"
@@ -352,7 +362,8 @@ def write_single_episode_metadata(
         }
     }]
     video_keys = schema.video_columns  # Already a list
-    episodes_dir = create_episodes_parquet(structure["meta"], chunk_results, 1, video_keys, fps=fps, task_name=task_name)
+    episodes_dir = create_episodes_parquet(structure["meta"], chunk_results, 1, video_keys, fps=fps, task_name=task_name,
+                                           path_format=path_format)
     written_files.append(str(episodes_dir))
 
     # Create stats.json (v3.0)

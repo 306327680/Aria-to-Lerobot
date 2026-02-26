@@ -129,9 +129,17 @@ class LeRobotSchema:
             "chunks_size": 1000,
             "fps": fps,
 
-            # Data paths (use LeRobot-compatible variable names for visualization)
-            "data_path": "data/chunk-{chunk_index:03d}/episode_{file_index:06d}.parquet",
-            "video_path": "videos/chunk-{chunk_index:03d}/{video_key}/episode_{file_index:06d}.mp4",
+            # Data paths: 'groot' = episode_chunk/episode_index, 'lerobot' = chunk_index/file_index
+            "data_path": (
+                "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+                if kwargs.get("path_format", "groot") == "groot"
+                else "data/chunk-{chunk_index:03d}/episode_{file_index:06d}.parquet"
+            ),
+            "video_path": (
+                "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+                if kwargs.get("path_format", "groot") == "groot"
+                else "videos/chunk-{chunk_index:03d}/{video_key}/episode_{file_index:06d}.mp4"
+            ),
 
             # v2.1 features schema (compatible with visualize_dataset)
             "features": features
@@ -172,31 +180,17 @@ LEROBOT_V3_SCHEMA = LeRobotSchema(
         "episode_id": ColumnSpec((), "int32", "Episode identifier"),
         "step": ColumnSpec((), "int64", "Step within episode (0-indexed)"),
 
-        # Standard LeRobot observation.state: hand landmarks + pose (63 + 16 = 79 dims)
-        "observation.state": ColumnSpec((79,), "float32", "Hand landmarks (63) + device pose (16)"),
+        # Standard LeRobot observation.state: thumb xyz + index xyz + distance = 7 dims
+        "observation.state": ColumnSpec((7,), "float32", "Thumb xyz (3) + index xyz (3) + pinch distance (1)"),
 
-        # Standard LeRobot action: tactile forces (left_total + right_total + left_xyz + right_xyz = 1+1+3+3 = 8 dims)
-        "action": ColumnSpec((8,), "float32", "Tactile forces: [left_total, right_total, left_xyz(3), right_xyz(3)]"),
+        # Standard LeRobot action: tactile forces (thumb + index = 2 dims)
+        "action": ColumnSpec((2,), "float32", "Tactile forces: [thumb_total, index_total]"),
 
-        # Keep original detailed columns for reference
-        "status.hands.landmarks_world": ColumnSpec((63,), "float32", "Hand landmarks in world coords (21×3 flattened)"),
-        "status.hands.valid_left": ColumnSpec((), "bool", "Left hand validity flag"),
+        # Detailed columns
         "status.hands.valid_right": ColumnSpec((), "bool", "Right hand validity flag"),
 
-        "action.tactile.left.force_total": ColumnSpec((), "float32", "Left hand total force"),
-        "action.tactile.right.force_total": ColumnSpec((), "float32", "Right hand total force"),
-        "action.tactile.left.force_xyz": ColumnSpec((3,), "float32", "Left hand force vector"),
-        "action.tactile.right.force_xyz": ColumnSpec((3,), "float32", "Right hand force vector"),
-
-        # Tactile action masks
-        "action.mask.tactile.left.force_total": ColumnSpec((), "bool", "Left force total mask"),
-        "action.mask.tactile.right.force_total": ColumnSpec((), "bool", "Right force total mask"),
-        "action.mask.tactile.left.force_xyz": ColumnSpec((3,), "bool", "Left force vector mask"),
-        "action.mask.tactile.right.force_xyz": ColumnSpec((3,), "bool", "Right force vector mask"),
-
-        # Device pose
-        "status.pose.world_device": ColumnSpec((16,), "float32", "World to device transform (4×4 flattened)"),
-        "status.pose.valid": ColumnSpec((), "bool", "Pose validity flag"),
+        "action.tactile.left.force_total": ColumnSpec((), "float32", "Thumb sensor total force"),
+        "action.tactile.right.force_total": ColumnSpec((), "float32", "Index sensor total force"),
     },
     required_columns=[
         "index", "episode_index", "episode_chunk", "frame_index", "task_index",
@@ -220,31 +214,17 @@ LEROBOT_V21_SCHEMA = LeRobotSchema(
         "episode_id": ColumnSpec((), "int32", "Episode identifier"),
         "step": ColumnSpec((), "int64", "Step within episode (0-indexed)"),
 
-        # Standard LeRobot observation.state: hand landmarks + pose (63 + 16 = 79 dims)
-        "observation.state": ColumnSpec((79,), "float32", "Hand landmarks (63) + device pose (16)"),
+        # Standard LeRobot observation.state: thumb xyz + index xyz + distance = 7 dims
+        "observation.state": ColumnSpec((7,), "float32", "Thumb xyz (3) + index xyz (3) + pinch distance (1)"),
 
-        # Standard LeRobot action: tactile forces (left_total + right_total + left_xyz + right_xyz = 1+1+3+3 = 8 dims)
-        "action": ColumnSpec((8,), "float32", "Tactile forces: [left_total, right_total, left_xyz(3), right_xyz(3)]"),
+        # Standard LeRobot action: tactile forces (thumb + index = 2 dims)
+        "action": ColumnSpec((2,), "float32", "Tactile forces: [thumb_total, index_total]"),
 
-        # Keep original detailed columns for reference
-        "status.hands.landmarks_world": ColumnSpec((63,), "float32", "Hand landmarks in world coords (21×3 flattened)"),
-        "status.hands.valid_left": ColumnSpec((), "bool", "Left hand validity flag"),
+        # Detailed columns
         "status.hands.valid_right": ColumnSpec((), "bool", "Right hand validity flag"),
 
-        "action.tactile.left.force_total": ColumnSpec((), "float32", "Left hand total force"),
-        "action.tactile.right.force_total": ColumnSpec((), "float32", "Right hand total force"),
-        "action.tactile.left.force_xyz": ColumnSpec((3,), "float32", "Left hand force vector"),
-        "action.tactile.right.force_xyz": ColumnSpec((3,), "float32", "Right hand force vector"),
-
-        # Tactile action masks
-        "action.mask.tactile.left.force_total": ColumnSpec((), "bool", "Left force total mask"),
-        "action.mask.tactile.right.force_total": ColumnSpec((), "bool", "Right force total mask"),
-        "action.mask.tactile.left.force_xyz": ColumnSpec((3,), "bool", "Left force vector mask"),
-        "action.mask.tactile.right.force_xyz": ColumnSpec((3,), "bool", "Right force vector mask"),
-
-        # Device pose
-        "status.pose.world_device": ColumnSpec((16,), "float32", "World to device transform (4×4 flattened)"),
-        "status.pose.valid": ColumnSpec((), "bool", "Pose validity flag"),
+        "action.tactile.left.force_total": ColumnSpec((), "float32", "Thumb sensor total force"),
+        "action.tactile.right.force_total": ColumnSpec((), "float32", "Index sensor total force"),
     },
     required_columns=[
         "index", "episode_index", "frame_index", "task_index",
@@ -305,38 +285,24 @@ def create_tactile_placeholders(force_left: Optional[Tuple[float, np.ndarray]] =
     Create tactile action data (real values or NaN placeholders)
 
     Args:
-        force_left: Tuple of (magnitude, xyz_array) for left sensor (optional)
-        force_right: Tuple of (magnitude, xyz_array) for right sensor (optional)
+        force_left: Tuple of (magnitude, xyz_array) for left/thumb sensor (optional)
+        force_right: Tuple of (magnitude, xyz_array) for right/index sensor (optional)
 
     Returns:
-        Dictionary with tactile data columns and masks
+        Dictionary with tactile total force columns
     """
     if force_left is not None and force_right is not None:
-        # Real haptic data available - unpack tuples
-        left_mag, left_xyz = force_left
-        right_mag, right_xyz = force_right
+        left_mag, _ = force_left
+        right_mag, _ = force_right
 
         return {
             "action.tactile.left.force_total": np.float32(left_mag),
             "action.tactile.right.force_total": np.float32(right_mag),
-            "action.tactile.left.force_xyz": left_xyz.astype(np.float32),
-            "action.tactile.right.force_xyz": right_xyz.astype(np.float32),
-            "action.mask.tactile.left.force_total": True,
-            "action.mask.tactile.right.force_total": True,
-            "action.mask.tactile.left.force_xyz": np.array([True, True, True]),
-            "action.mask.tactile.right.force_xyz": np.array([True, True, True]),
         }
     else:
-        # Fallback to NaN placeholders
         return {
             "action.tactile.left.force_total": np.float32(np.nan),
             "action.tactile.right.force_total": np.float32(np.nan),
-            "action.tactile.left.force_xyz": np.full(3, np.nan, dtype=np.float32),
-            "action.tactile.right.force_xyz": np.full(3, np.nan, dtype=np.float32),
-            "action.mask.tactile.left.force_total": False,
-            "action.mask.tactile.right.force_total": False,
-            "action.mask.tactile.left.force_xyz": np.array([False, False, False]),
-            "action.mask.tactile.right.force_xyz": np.array([False, False, False]),
         }
 
 

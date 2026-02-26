@@ -7,7 +7,7 @@ and processing all episodes in a single pass through the VRS file.
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Set
 import time
 
 from .io_parquet import ParquetWriter
@@ -35,7 +35,9 @@ def process_all_chunks_single_pass(
     create_visualization: bool = False,
     rotate_visualization: bool = False,
     vrs_path: Optional[str] = None,
-    mps_dir: Optional[str] = None
+    mps_dir: Optional[str] = None,
+    active_chunk_indices: Optional[Set[int]] = None,
+    episode_id_map: Optional[Dict[int, int]] = None
 ) -> List[Dict]:
     """
     Process all chunks in a SINGLE PASS through VRS file.
@@ -55,12 +57,15 @@ def process_all_chunks_single_pass(
         legacy_v21: Use LeRobot v2.1 format
         create_camera_frame_iterator: Function to create frame iterator
         encode_videos_func: Function to encode videos
+        active_chunk_indices: Optional set of chunk indices to process (skip others)
+        episode_id_map: Optional mapping from chunk_idx to episode_id for sequential naming
 
     Returns:
-        List of chunk results (one per chunk/episode)
+        List of chunk results (one per active chunk/episode)
     """
     num_chunks = len(chunk_boundaries_ns) - 1
-    logger.info(f"Processing {num_chunks} chunks in single pass through VRS")
+    active_count = len(active_chunk_indices) if active_chunk_indices else num_chunks
+    logger.info(f"Processing {active_count} active chunks out of {num_chunks} total in single pass through VRS")
 
     # Initialize writers for all chunks
     chunk_writers = []
@@ -68,11 +73,21 @@ def process_all_chunks_single_pass(
     chunk_data = []
 
     for chunk_idx in range(num_chunks):
+        # Skip inactive chunks (gaps between segments)
+        if active_chunk_indices is not None and chunk_idx not in active_chunk_indices:
+            chunk_writers.append(None)
+            chunk_progresses.append(None)
+            chunk_data.append(None)
+            continue
+
+        # Use mapped episode ID for file naming (sequential: 0, 1, 2...)
+        episode_id = episode_id_map[chunk_idx] if episode_id_map else chunk_idx
+
         # Create parquet writer for this chunk/episode
         writer = ParquetWriter(
             output_dir=structure["data"],
             schema=schema,
-            base_filename=f"episode_{chunk_idx:06d}"
+            base_filename=f"episode_{episode_id:06d}"
         )
         chunk_writers.append(writer)
 
@@ -114,18 +129,27 @@ def process_all_chunks_single_pass(
         if chunk_idx is None:
             continue  # Frame outside all chunks
 
+        # Skip frames routed to inactive chunks (gaps between segments)
+        if active_chunk_indices is not None and chunk_idx not in active_chunk_indices:
+            continue
+
         # Get chunk-specific data
         data = chunk_data[chunk_idx]
         writer = chunk_writers[chunk_idx]
         progress = chunk_progresses[chunk_idx]
 
+        # Use mapped episode ID for parquet metadata
+        episode_id = episode_id_map[chunk_idx] if episode_id_map else chunk_idx
+
         # Calculate global index dynamically
-        global_index = sum(chunk_data[i]["valid_frames"] for i in range(chunk_idx)) + data["valid_frames"]
+        active_indices_before = [i for i in range(chunk_idx)
+                                 if active_chunk_indices is None or i in active_chunk_indices]
+        global_index = sum(chunk_data[i]["valid_frames"] for i in active_indices_before) + data["valid_frames"]
 
         # Extract frame data
         chunk_start_ns = chunk_boundaries_ns[chunk_idx]
         frame_data = frame_extract(
-            session, timestamp_ns, data["step"], chunk_idx,
+            session, timestamp_ns, data["step"], episode_id,
             max_slop_ns, chunk_start_ns, haptic_loader,
             global_index, fps, start_timestamp_ns  # Pass global start timestamp for haptic alignment
         )
@@ -152,13 +176,18 @@ def process_all_chunks_single_pass(
     cumulative_frames = 0
 
     for chunk_idx in range(num_chunks):
+        # Skip inactive chunks
+        if active_chunk_indices is not None and chunk_idx not in active_chunk_indices:
+            continue
+
         data = chunk_data[chunk_idx]
         writer = chunk_writers[chunk_idx]
+        episode_id = episode_id_map[chunk_idx] if episode_id_map else chunk_idx
 
         global_start = cumulative_frames
         global_end = cumulative_frames + data['valid_frames'] - 1
 
-        logger.info(f"Chunk {chunk_idx}: {data['valid_frames']} frames, "
+        logger.info(f"Episode {episode_id} (chunk {chunk_idx}): {data['valid_frames']} frames, "
                    f"global index {global_start}-{global_end}")
 
         # Finalize parquet writer
@@ -166,15 +195,15 @@ def process_all_chunks_single_pass(
 
         # Write video for this chunk
         if data["video_frames"]:
-            encode_videos_func(data["video_frames"], structure["video_main"], fps, chunk_idx)
+            encode_videos_func(data["video_frames"], structure["video_main"], fps, episode_id)
 
         # Generate visualization video for this episode if requested
         if create_visualization and vrs_path and mps_dir:
-            logger.info(f"Generating visualization for episode {chunk_idx}...")
+            logger.info(f"Generating visualization for episode {episode_id}...")
             try:
                 # Get output directory from structure
                 out_dir = structure["root"]
-                viz_output_path = out_dir / f"visualization_episode_{chunk_idx:06d}.mp4"
+                viz_output_path = out_dir / f"visualization_episode_{episode_id:06d}.mp4"
 
                 # Calculate time range for this episode
                 start_time_s = (chunk_boundaries_ns[chunk_idx] - start_timestamp_ns) / 1e9
@@ -203,9 +232,9 @@ def process_all_chunks_single_pass(
                     global_start_timestamp_ns=start_timestamp_ns,  # Use global start for haptic data alignment
                     session=session  # 🔥 Reuse the same session for all episodes!
                 )
-                logger.info(f"Visualization for episode {chunk_idx} created: {viz_output_path}")
+                logger.info(f"Visualization for episode {episode_id} created: {viz_output_path}")
             except Exception as e:
-                logger.warning(f"Failed to create visualization for episode {chunk_idx}: {e}")
+                logger.warning(f"Failed to create visualization for episode {episode_id}: {e}")
 
         # Calculate statistics
         if data["hand_stats"]["total"] > 0:
@@ -224,7 +253,7 @@ def process_all_chunks_single_pass(
 
         # Prepare result
         chunk_results.append({
-            'chunk_idx': chunk_idx,
+            'chunk_idx': episode_id,
             'start_time_s': (chunk_boundaries_ns[chunk_idx] - start_timestamp_ns) / 1e9,
             'end_time_s': 'end' if chunk_boundaries_ns[chunk_idx+1] is None else (chunk_boundaries_ns[chunk_idx+1] - start_timestamp_ns) / 1e9,
             'result': {
@@ -285,3 +314,74 @@ def create_chunk_boundaries(
 
     logger.info(f"Created {len(chunk_boundaries_ns) - 1} chunk boundaries")
     return chunk_boundaries_ns
+
+
+def load_segment_pairs(segments_csv: str) -> List[Tuple[float, float]]:
+    """Load enabled force segment start/end pairs from alignment tool CSV.
+
+    Reads CSV with columns: segment_id, start_time_s, end_time_s, duration_s, enabled
+    Only returns segments where enabled == 'true'.
+
+    Args:
+        segments_csv: Path to segments CSV file from Aria-Haptic alignment tool
+
+    Returns:
+        Sorted list of (start_time_s, end_time_s) tuples for enabled segments
+    """
+    import csv
+    segments = []
+
+    with open(segments_csv, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            enabled = row.get('enabled', 'true').strip().lower()
+            if enabled == 'true':
+                start = float(row['start_time_s'])
+                end = float(row['end_time_s'])
+                segments.append((start, end))
+
+    segments.sort(key=lambda s: s[0])
+    logger.info(f"Loaded {len(segments)} enabled segments from {segments_csv}")
+    return segments
+
+
+def create_segment_boundaries(
+    segments: List[Tuple[float, float]],
+    start_timestamp_ns: int
+) -> Tuple[List[int], Set[int], Dict[int, int]]:
+    """Create interleaved chunk boundaries from segment pairs.
+
+    Produces boundaries: [seg0_start, seg0_end, seg1_start, seg1_end, ..., None]
+    Even-indexed chunks (0, 2, 4...) are active segments.
+    Odd-indexed chunks (1, 3, 5...) are gaps to be skipped.
+
+    Args:
+        segments: Sorted list of (start_time_s, end_time_s) tuples
+        start_timestamp_ns: Global start timestamp in nanoseconds
+
+    Returns:
+        Tuple of:
+        - boundaries_ns: Interleaved boundary timestamps with None sentinel
+        - active_indices: Set of active chunk indices (even numbers)
+        - episode_id_map: Mapping from chunk_idx to sequential episode_id
+    """
+    boundaries_ns = []
+    for start_s, end_s in segments:
+        boundaries_ns.append(int(start_s * 1e9) + start_timestamp_ns)
+        boundaries_ns.append(int(end_s * 1e9) + start_timestamp_ns)
+    boundaries_ns.append(None)  # sentinel for last boundary
+
+    # Even chunks = active segments, odd chunks = gaps
+    num_chunks = len(boundaries_ns) - 1
+    active_indices = set(range(0, num_chunks, 2))
+
+    # Map active chunk indices to sequential episode IDs: {0: 0, 2: 1, 4: 2, ...}
+    episode_id_map = {}
+    episode_counter = 0
+    for idx in sorted(active_indices):
+        episode_id_map[idx] = episode_counter
+        episode_counter += 1
+
+    logger.info(f"Created {len(segments)} segment boundaries "
+                f"({len(active_indices)} active, {num_chunks - len(active_indices)} gaps)")
+    return boundaries_ns, active_indices, episode_id_map

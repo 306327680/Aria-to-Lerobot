@@ -2,9 +2,8 @@
 Frame data extraction and processing
 
 Handles extraction of multi-modal data from Aria frames:
-- Pose data
-- Hand tracking data
-- Haptic sensor data
+- Hand tracking data (thumb + index fingertip positions)
+- Haptic sensor data (tactile forces)
 - Image data
 """
 
@@ -12,7 +11,7 @@ import logging
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
-from .schema import flatten_hand_landmarks, create_tactile_placeholders, flatten_pose_matrix
+from .schema import create_tactile_placeholders
 
 logger = logging.getLogger(__name__)
 
@@ -68,17 +67,11 @@ def extract_frame_data(
         "step": np.int64(step),
     }
 
-    # Extract pose data
+    # Extract pose data (needed for hand landmark world projection)
     pose = session.nearest_pose(timestamp_ns, max_slop_ns)
-    if pose is not None:
-        pose_matrix = pose.T_world_device.to_matrix()
-        row_data["status.pose.world_device"] = flatten_pose_matrix(pose_matrix)
-        row_data["status.pose.valid"] = True
-    else:
-        row_data["status.pose.world_device"] = np.full(16, np.nan, dtype=np.float32)
-        row_data["status.pose.valid"] = False
 
     # Extract hand data
+    right_landmarks_21x3 = None
     hands_data = session.nearest_hands(timestamp_ns, max_slop_ns)
     if hands_data is not None and pose is not None:
         # Get world coordinates using the hand projector
@@ -86,19 +79,24 @@ def extract_frame_data(
             timestamp_ns, pose.T_world_device, max_slop_ns=max_slop_ns
         )
 
-        left_landmarks = world_landmarks.get("left")
-        right_landmarks = world_landmarks.get("right")
-
-        # Store hand landmarks
-        flattened, valid_left, valid_right = flatten_hand_landmarks(left_landmarks, right_landmarks)
-        row_data["status.hands.landmarks_world"] = flattened
-        row_data["status.hands.valid_left"] = valid_left
-        row_data["status.hands.valid_right"] = valid_right
+        right_landmarks_21x3 = world_landmarks.get("right")
+        row_data["status.hands.valid_right"] = (
+            right_landmarks_21x3 is not None
+            and right_landmarks_21x3.shape == (21, 3)
+            and not np.any(np.isnan(right_landmarks_21x3))
+        )
     else:
-        # No hand data available
-        row_data["status.hands.landmarks_world"] = np.full(63, np.nan, dtype=np.float32)
-        row_data["status.hands.valid_left"] = False
         row_data["status.hands.valid_right"] = False
+
+    # Build observation.state: thumb xyz (3) + index xyz (3) + distance (1) = 7 dims
+    if right_landmarks_21x3 is not None and right_landmarks_21x3.shape == (21, 3):
+        thumb_xyz = right_landmarks_21x3[4]   # thumb tip
+        index_xyz = right_landmarks_21x3[8]   # index finger tip
+        distance = np.linalg.norm(thumb_xyz - index_xyz)
+        observation_state = np.concatenate([thumb_xyz, index_xyz, [distance]]).astype(np.float32)
+    else:
+        observation_state = np.full(7, np.nan, dtype=np.float32)
+    row_data["observation.state"] = observation_state
 
     # Get haptic force values if loader is available
     # Use global timestamp for haptic alignment (not episode-relative time)
@@ -110,24 +108,10 @@ def extract_frame_data(
     tactile_data = create_tactile_placeholders(force_left, force_right)
     row_data.update(tactile_data)
 
-    # Generate standard LeRobot columns for visualization compatibility
-    # observation.state: hand landmarks (63) + device pose (16) = 79 dims
-    observation_state = np.concatenate([
-        row_data["status.hands.landmarks_world"],  # 63 dims
-        row_data["status.pose.world_device"]       # 16 dims
-    ]).astype(np.float32)
-    row_data["observation.state"] = observation_state
-
-    # action: tactile forces [left_total, right_total, left_xyz(3), right_xyz(3)] = 8 dims
+    # action: tactile forces [thumb_total, index_total] = 2 dims
     action = np.array([
-        row_data["action.tactile.left.force_total"],   # 1 dim
-        row_data["action.tactile.right.force_total"],  # 1 dim
-        row_data["action.tactile.left.force_xyz"][0],  # 3 dims
-        row_data["action.tactile.left.force_xyz"][1],
-        row_data["action.tactile.left.force_xyz"][2],
-        row_data["action.tactile.right.force_xyz"][0], # 3 dims
-        row_data["action.tactile.right.force_xyz"][1],
-        row_data["action.tactile.right.force_xyz"][2],
+        row_data["action.tactile.left.force_total"],   # thumb sensor
+        row_data["action.tactile.right.force_total"],   # index sensor
     ], dtype=np.float32)
     row_data["action"] = action
 
@@ -142,14 +126,9 @@ def update_processing_stats(row_data: Dict[str, Any], processed_data: Dict[str, 
         processed_data: Processing statistics dictionary to update
     """
     # Update hand statistics
-    if row_data.get('status.hands.valid_left') or row_data.get('status.hands.valid_right'):
+    if row_data.get('status.hands.valid_right'):
         processed_data["hand_stats"]["valid"] += 1
     processed_data["hand_stats"]["total"] += 1
-
-    # Update pose statistics
-    if row_data.get('status.pose.valid'):
-        processed_data["pose_stats"]["valid"] += 1
-    processed_data["pose_stats"]["total"] += 1
 
 
 def finalize_processing_stats(processed_data: Dict[str, Any]):
