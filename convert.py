@@ -14,6 +14,7 @@ import time
 import json
 from functools import partial
 from pathlib import Path
+import shutil
 from typing import Optional, List, Dict, Any, Tuple, Iterator
 import numpy as np
 import cv2
@@ -285,6 +286,11 @@ def convert(vrs_path: str,
                 logger.error(error)
             raise ValueError(f"Validation failed: {validation_errors}")
     
+    # Clean output directory if overwrite is enabled (only for first chunk or no chunk)
+    if overwrite and out_dir.exists() and (chunk_id is None or chunk_id == 0):
+        logger.info(f"Overwrite enabled — cleaning output directory: {out_dir}")
+        shutil.rmtree(out_dir)
+
     # Create output structure
     structure = create_output_structure(out_dir, legacy_v21)
     schema = LEROBOT_V21_SCHEMA if legacy_v21 else LEROBOT_V3_SCHEMA
